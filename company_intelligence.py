@@ -676,13 +676,277 @@ class CompanyIntelligence:
         
         return optimal_k
     
-    def perform_clustering(self, n_clusters: int = None, method: str = 'kmeans'):
+    def _stratified_balanced_kmeans(self, n_clusters: int, max_iterations: int = 200, tolerance: float = 0.05):
+        """
+        Stratified Balanced K-Means: Uses stratified sampling for initialization
+        and aggressive balancing for very even distribution
+        
+        Args:
+            n_clusters: Number of clusters
+            max_iterations: Maximum iterations for balancing
+            tolerance: Acceptable deviation from perfect balance (0.05 = 5%)
+        
+        Returns:
+            Cluster labels
+        """
+        n_samples = len(self.df_processed_scaled)
+        target_size = n_samples / n_clusters
+        min_size = max(1, int(target_size * (1 - tolerance)))
+        max_size = int(target_size * (1 + tolerance))
+        
+        print(f"  Target cluster size: ~{target_size:.0f} (range: {min_size}-{max_size})")
+        print(f"  Using stratified initialization with aggressive balancing...")
+        
+        # Stratified initialization: divide data into n_clusters groups first
+        data_array = self.df_processed_scaled.values
+        indices = np.arange(n_samples)
+        
+        # Sort by first principal component for better stratification
+        if data_array.shape[1] > 0:
+            pca_temp = PCA(n_components=1)
+            pca_scores = pca_temp.fit_transform(data_array)
+            sorted_indices = indices[np.argsort(pca_scores.flatten())]
+        else:
+            sorted_indices = indices
+        
+        # Initialize centroids using stratified sampling
+        initial_centroids = []
+        for k in range(n_clusters):
+            start_idx = (k * n_samples) // n_clusters
+            end_idx = ((k + 1) * n_samples) // n_clusters
+            if end_idx > start_idx:
+                cluster_indices = sorted_indices[start_idx:end_idx]
+                initial_centroids.append(data_array[cluster_indices].mean(axis=0))
+            else:
+                initial_centroids.append(data_array[sorted_indices[k % len(sorted_indices)]])
+        
+        centroids = np.array(initial_centroids)
+        
+        # Initial assignment with size constraints
+        clusters = np.zeros(n_samples, dtype=int)
+        cluster_sizes = np.zeros(n_clusters, dtype=int)
+        
+        # Calculate distances from all points to all centroids
+        distances = np.zeros((n_samples, n_clusters))
+        for i in range(n_samples):
+            for j in range(n_clusters):
+                distances[i, j] = np.linalg.norm(data_array[i] - centroids[j])
+        
+        # Greedy assignment with size constraints
+        assigned = np.zeros(n_samples, dtype=bool)
+        remaining = np.arange(n_samples)
+        
+        # Assign points to clusters respecting size constraints
+        while len(remaining) > 0:
+            best_assignments = []
+            for idx in remaining:
+                if not assigned[idx]:
+                    # Find best cluster that's not full
+                    for cluster_id in range(n_clusters):
+                        if cluster_sizes[cluster_id] < max_size:
+                            best_assignments.append((idx, cluster_id, distances[idx, cluster_id]))
+            
+            if not best_assignments:
+                # If all clusters are full, assign to smallest
+                for idx in remaining:
+                    if not assigned[idx]:
+                        smallest_cluster = np.argmin(cluster_sizes)
+                        clusters[idx] = smallest_cluster
+                        cluster_sizes[smallest_cluster] += 1
+                        assigned[idx] = True
+                break
+            
+            # Sort by distance and assign
+            best_assignments.sort(key=lambda x: x[2])
+            for idx, cluster_id, _ in best_assignments:
+                if not assigned[idx] and cluster_sizes[cluster_id] < max_size:
+                    clusters[idx] = cluster_id
+                    cluster_sizes[cluster_id] += 1
+                    assigned[idx] = True
+                    remaining = remaining[remaining != idx]
+                    if len(remaining) == 0:
+                        break
+        
+        # Aggressive balancing iterations
+        for iteration in range(max_iterations):
+            cluster_counts = pd.Series(clusters).value_counts()
+            cluster_counts = cluster_counts.reindex(range(n_clusters), fill_value=0)
+            
+            # Check if balanced
+            if cluster_counts.min() >= min_size and cluster_counts.max() <= max_size:
+                print(f"  ✓ Clusters balanced after {iteration} iterations")
+                break
+            
+            # Update centroids
+            for cluster_id in range(n_clusters):
+                cluster_mask = clusters == cluster_id
+                if cluster_mask.sum() > 0:
+                    centroids[cluster_id] = data_array[cluster_mask].mean(axis=0)
+            
+            # Recalculate all distances
+            for i in range(n_samples):
+                for j in range(n_clusters):
+                    distances[i, j] = np.linalg.norm(data_array[i] - centroids[j])
+            
+            # Find oversized and undersized clusters
+            oversized = cluster_counts[cluster_counts > max_size].index.tolist()
+            undersized = cluster_counts[cluster_counts < min_size].index.tolist()
+            
+            if not oversized or not undersized:
+                # Try to balance even if within tolerance
+                if iteration % 10 == 0:
+                    # Every 10 iterations, try to balance more aggressively
+                    oversized = cluster_counts[cluster_counts > target_size * 1.1].index.tolist()
+                    undersized = cluster_counts[cluster_counts < target_size * 0.9].index.tolist()
+                else:
+                    break
+            
+            # Reassign points
+            reassigned = 0
+            for large_cluster in oversized:
+                large_indices = np.where(clusters == large_cluster)[0]
+                excess = cluster_counts[large_cluster] - max_size
+                
+                if excess <= 0 or len(large_indices) == 0:
+                    continue
+                
+                # Find best reassignments for this oversized cluster
+                reassign_candidates = []
+                for idx in large_indices:
+                    for small_cluster in undersized:
+                        if cluster_counts[small_cluster] < max_size:
+                            reassign_candidates.append((idx, small_cluster, distances[idx, small_cluster]))
+                
+                # Sort by distance
+                reassign_candidates.sort(key=lambda x: x[2])
+                
+                # Reassign excess points
+                for i in range(min(excess, len(reassign_candidates))):
+                    idx, new_cluster, _ = reassign_candidates[i]
+                    if cluster_counts[new_cluster] < max_size:
+                        clusters[idx] = new_cluster
+                        reassigned += 1
+                        cluster_counts[large_cluster] -= 1
+                        cluster_counts[new_cluster] += 1
+                        if cluster_counts[large_cluster] <= max_size:
+                            break
+            
+            if reassigned == 0:
+                break
+        
+        return clusters
+    
+    def _balanced_kmeans(self, n_clusters: int, max_iterations: int = 100, tolerance: float = 0.10):
+        """
+        Standard Balanced K-Means: Uses multiple initializations and iterative balancing
+        
+        Args:
+            n_clusters: Number of clusters
+            max_iterations: Maximum iterations for balancing
+            tolerance: Acceptable deviation from perfect balance (0.10 = 10%)
+        
+        Returns:
+            Cluster labels
+        """
+        n_samples = len(self.df_processed_scaled)
+        target_size = n_samples / n_clusters
+        min_size = max(1, int(target_size * (1 - tolerance)))
+        max_size = int(target_size * (1 + tolerance))
+        
+        print(f"  Target cluster size: ~{target_size:.0f} (range: {min_size}-{max_size})")
+        
+        # Try multiple initializations and pick the most balanced
+        best_clusters = None
+        best_balance = float('inf')
+        
+        for init in range(10):  # Try 10 different initializations
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42+init, n_init=1, init='k-means++')
+            clusters = kmeans.fit_predict(self.df_processed_scaled)
+            cluster_counts = pd.Series(clusters).value_counts()
+            
+            # Calculate balance score (coefficient of variation)
+            if len(cluster_counts) == n_clusters and cluster_counts.mean() > 0:
+                cv = (cluster_counts.std() / cluster_counts.mean()) * 100
+                if cv < best_balance:
+                    best_balance = cv
+                    best_clusters = clusters.copy()
+        
+        clusters = best_clusters if best_clusters is not None else kmeans.fit_predict(self.df_processed_scaled)
+        data_array = self.df_processed_scaled.values
+        centroids = np.array([
+            data_array[clusters == i].mean(axis=0) 
+            for i in range(n_clusters)
+        ])
+        
+        # Balance clusters iteratively
+        for iteration in range(max_iterations):
+            cluster_counts = pd.Series(clusters).value_counts()
+            cluster_counts = cluster_counts.reindex(range(n_clusters), fill_value=0)
+            
+            # Check if balanced
+            if cluster_counts.min() >= min_size and cluster_counts.max() <= max_size:
+                print(f"  ✓ Clusters balanced after {iteration} iterations")
+                break
+            
+            # Update centroids
+            for cluster_id in range(n_clusters):
+                cluster_mask = clusters == cluster_id
+                if cluster_mask.sum() > 0:
+                    centroids[cluster_id] = data_array[cluster_mask].mean(axis=0)
+            
+            # Find clusters that need adjustment
+            oversized = cluster_counts[cluster_counts > max_size].index.tolist()
+            undersized = cluster_counts[cluster_counts < min_size].index.tolist()
+            
+            if not oversized or not undersized:
+                break
+            
+            # Reassign points from oversized to undersized clusters
+            reassigned = 0
+            for large_cluster in oversized:
+                large_indices = np.where(clusters == large_cluster)[0]
+                
+                if len(large_indices) == 0:
+                    continue
+                
+                # Calculate distances to all centroids
+                reassign_candidates = []
+                for idx in large_indices:
+                    point = data_array[idx:idx+1]
+                    for small_cluster in undersized:
+                        if small_cluster < len(centroids) and cluster_counts[small_cluster] < max_size:
+                            dist = np.linalg.norm(point - centroids[small_cluster])
+                            reassign_candidates.append((idx, small_cluster, dist))
+                
+                # Sort by distance (closest first)
+                reassign_candidates.sort(key=lambda x: x[2])
+                
+                # Reassign excess points
+                excess = cluster_counts[large_cluster] - max_size
+                for i in range(min(excess, len(reassign_candidates))):
+                    idx, new_cluster, _ = reassign_candidates[i]
+                    if cluster_counts[new_cluster] < max_size:
+                        clusters[idx] = new_cluster
+                        reassigned += 1
+                        cluster_counts[large_cluster] -= 1
+                        cluster_counts[new_cluster] += 1
+                        if cluster_counts[large_cluster] <= max_size:
+                            break
+            
+            if reassigned == 0:
+                break
+        
+        return clusters
+    
+    def perform_clustering(self, n_clusters: int = None, method: str = 'kmeans', balanced: bool = True, balance_method: str = 'stratified'):
         """
         Perform clustering on the processed data
         
         Args:
             n_clusters: Number of clusters (if None, will determine optimal)
             method: Clustering method ('kmeans' or 'dbscan')
+            balanced: If True, use balanced clustering for more even distribution (default: True)
+            balance_method: Method for balancing ('stratified' for best balance, 'standard' for faster)
         """
         print("\n" + "="*50)
         print("PERFORMING CLUSTERING")
@@ -692,8 +956,23 @@ class CompanyIntelligence:
             n_clusters = self.determine_optimal_clusters()
         
         if method == 'kmeans':
-            self.cluster_model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            self.clusters = self.cluster_model.fit_predict(self.df_processed_scaled)
+            if balanced:
+                if balance_method == 'stratified':
+                    print(f"\nUsing Stratified Balanced K-Means for optimal even distribution...")
+                    self.clusters = self._stratified_balanced_kmeans(n_clusters, tolerance=0.05)
+                else:
+                    print(f"\nUsing Balanced K-Means for even distribution...")
+                    self.clusters = self._balanced_kmeans(n_clusters, tolerance=0.10)
+                
+                # Store model info (centroids calculated during balancing)
+                self.cluster_model = KMeans(n_clusters=n_clusters, random_state=42, n_init=1)
+                self.cluster_model.cluster_centers_ = np.array([
+                    self.df_processed_scaled[self.clusters == i].mean().values 
+                    for i in range(n_clusters)
+                ])
+            else:
+                self.cluster_model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                self.clusters = self.cluster_model.fit_predict(self.df_processed_scaled)
         elif method == 'dbscan':
             self.cluster_model = DBSCAN(eps=0.5, min_samples=5)
             self.clusters = self.cluster_model.fit_predict(self.df_processed_scaled)
@@ -706,6 +985,25 @@ class CompanyIntelligence:
         print(f"Cluster distribution:")
         cluster_counts = pd.Series(self.clusters).value_counts().sort_index()
         print(cluster_counts)
+        
+        # Calculate balance statistics
+        if balanced and method == 'kmeans':
+            sizes = cluster_counts.values
+            mean_size = sizes.mean()
+            std_size = sizes.std()
+            cv = (std_size / mean_size) * 100 if mean_size > 0 else 0  # Coefficient of variation
+            imbalance_ratio = sizes.max() / sizes.min() if sizes.min() > 0 else float('inf')
+            print(f"\nBalance Statistics:")
+            print(f"  Mean cluster size: {mean_size:.1f}")
+            print(f"  Std deviation: {std_size:.1f}")
+            print(f"  Coefficient of variation: {cv:.2f}% (lower is more balanced, target: <10%)")
+            print(f"  Size range: {sizes.min()} - {sizes.max()}")
+            print(f"  Imbalance ratio: {imbalance_ratio:.2f}x (target: <1.2x)")
+            
+            if cv > 10:
+                print(f"  ⚠ Warning: High imbalance (CV={cv:.2f}%). Consider using balance_method='stratified'")
+            elif cv < 5:
+                print(f"  ✓ Excellent balance achieved!")
         
         return self.clusters
     
@@ -1634,13 +1932,51 @@ Format your response in clear, business-friendly language suitable for executive
         print("CREATING VISUALIZATIONS")
         print("="*50)
         
-        # 1. Cluster distribution
-        fig, ax = plt.subplots(figsize=(10, 6))
+        # 1. Cluster distribution with balance statistics
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        
         cluster_counts = self.df['Cluster'].value_counts().sort_index()
-        ax.bar(cluster_counts.index.astype(str), cluster_counts.values)
-        ax.set_xlabel('Cluster')
-        ax.set_ylabel('Number of Companies')
-        ax.set_title('Company Distribution Across Segments')
+        
+        # Bar chart
+        bars = ax1.bar(cluster_counts.index.astype(str), cluster_counts.values, 
+                       color='steelblue', alpha=0.7, edgecolor='black')
+        ax1.set_xlabel('Cluster', fontsize=12)
+        ax1.set_ylabel('Number of Companies', fontsize=12)
+        ax1.set_title('Company Distribution Across Segments', fontsize=14, fontweight='bold')
+        ax1.grid(axis='y', alpha=0.3)
+        
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{int(height)}',
+                    ha='center', va='bottom', fontsize=10)
+        
+        # Balance statistics
+        sizes = cluster_counts.values
+        mean_size = sizes.mean()
+        std_size = sizes.std()
+        cv = (std_size / mean_size) * 100 if mean_size > 0 else 0
+        imbalance_ratio = sizes.max() / sizes.min() if sizes.min() > 0 else 0
+        
+        # Statistics text
+        stats_text = f"""Balance Statistics:
+        
+Mean Size: {mean_size:.1f}
+Std Deviation: {std_size:.1f}
+Coefficient of Variation: {cv:.2f}%
+Size Range: {sizes.min()} - {sizes.max()}
+Imbalance Ratio: {imbalance_ratio:.2f}x
+
+Target: Even distribution
+(CV < 20% is considered balanced)"""
+        
+        ax2.text(0.1, 0.5, stats_text, transform=ax2.transAxes,
+                fontsize=11, verticalalignment='center',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        ax2.axis('off')
+        ax2.set_title('Cluster Balance Metrics', fontsize=14, fontweight='bold')
+        
         plt.tight_layout()
         plt.savefig('cluster_distribution.png', dpi=300, bbox_inches='tight')
         plt.close()
@@ -2165,7 +2501,8 @@ Format your response in clear, business-friendly language suitable for executive
         # 4. Cluster (using 10 clusters based on revenue log10(1+x), IT budget, and IT spending)
         if n_clusters is None:
             n_clusters = 10  # Default to 10 clusters for revenue-based clustering
-        self.perform_clustering(n_clusters=n_clusters)
+        # Use stratified balanced method for optimal even distribution
+        self.perform_clustering(n_clusters=n_clusters, balanced=True, balance_method='stratified')
         
         # 5. Apply Chi-square tests on categorical variables
         chi_square_results = self.perform_chi_square_test()

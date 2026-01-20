@@ -5,7 +5,7 @@ Analyzes company data to generate actionable insights through data-driven segmen
 
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler, RobustScaler, LabelEncoder
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.linear_model import LogisticRegression, LinearRegression
@@ -67,6 +67,7 @@ class CompanyIntelligence:
         self.df = None
         self.df_processed = None
         self.scaler = StandardScaler()
+        self.robust_scaler = RobustScaler()
         self.label_encoders = {}
         self.clusters = None
         self.cluster_model = None
@@ -83,6 +84,7 @@ class CompanyIntelligence:
         self.driver_metrics = None
         self.performance_metrics = None
         self.pca_metrics = None
+        self.risk_factors = {}
         
         # Initialize LLM client if available
         self.client = None
@@ -265,6 +267,97 @@ class CompanyIntelligence:
         
         return self.df
     
+    def remove_segment1_outliers(self):
+        """
+        Remove outliers that match Segment 1 characteristics:
+        - Very high revenue (> 2 billion USD)
+        - Zero employees single site
+        - Zero market value
+        - Zero IT budget
+        
+        These are the 2 companies identified as outliers in Segment 1.
+        """
+        print("\n" + "="*50)
+        print("REMOVING SEGMENT 1 OUTLIERS")
+        print("="*50)
+        
+        if self.df is None or len(self.df) == 0:
+            print("⚠ Warning: No data to filter. Skipping outlier removal.")
+            return
+        
+        initial_count = len(self.df)
+        
+        # Find column names using the same pattern matching approach
+        revenue_col = self._find_column_by_pattern(['revenue', 'revenue_usd', 'annual_revenue', 'total_revenue', 'sales'])
+        employee_single_col = self._find_column_by_pattern(['employee single sites', 'employee_single_sites', 
+                                                             'single_site_employees', 'employees_single_site', 
+                                                             'single_site_employee_count'])
+        market_value_col = self._find_column_by_pattern(['market value', 'marketvalue', 'market_val', 
+                                                          'market_val_usd', 'market_cap'])
+        it_budget_col = self._find_column_by_pattern(['it budget', 'it_budget', 'it_budget_usd', 
+                                                       'technology_budget', 'tech_budget'])
+        
+        # Build filter conditions
+        outlier_mask = pd.Series([True] * len(self.df), index=self.df.index)
+        
+        if revenue_col:
+            # Revenue > 2 billion USD
+            outlier_mask = outlier_mask & (self.df[revenue_col] > 2000000000)
+            print(f"✓ Found revenue column: {revenue_col}")
+        else:
+            print("⚠ Warning: Could not find revenue column. Skipping revenue filter.")
+            return
+        
+        if employee_single_col:
+            # Employees Single Site = 0
+            outlier_mask = outlier_mask & (self.df[employee_single_col].fillna(0) == 0)
+            print(f"✓ Found employees single site column: {employee_single_col}")
+        else:
+            print("⚠ Warning: Could not find employees single site column. Skipping this filter.")
+        
+        if market_value_col:
+            # Market Value = 0
+            outlier_mask = outlier_mask & (self.df[market_value_col].fillna(0) == 0)
+            print(f"✓ Found market value column: {market_value_col}")
+        else:
+            print("⚠ Warning: Could not find market value column. Skipping this filter.")
+        
+        if it_budget_col:
+            # IT Budget = 0
+            outlier_mask = outlier_mask & (self.df[it_budget_col].fillna(0) == 0)
+            print(f"✓ Found IT budget column: {it_budget_col}")
+        else:
+            print("⚠ Warning: Could not find IT budget column. Skipping this filter.")
+        
+        # Count outliers
+        outlier_count = outlier_mask.sum()
+        
+        if outlier_count > 0:
+            print(f"\n✓ Identified {outlier_count} outlier(s) matching Segment 1 characteristics:")
+            
+            # Show details of outliers being removed
+            outliers_df = self.df[outlier_mask].copy()
+            if revenue_col:
+                print(f"  Revenue range: ${outliers_df[revenue_col].min():,.0f} - ${outliers_df[revenue_col].max():,.0f}")
+            if employee_single_col:
+                print(f"  Employees Single Site: {outliers_df[employee_single_col].unique()}")
+            if market_value_col:
+                print(f"  Market Value: {outliers_df[market_value_col].unique()}")
+            if it_budget_col:
+                print(f"  IT Budget: {outliers_df[it_budget_col].unique()}")
+            
+            # Remove outliers
+            self.df = self.df[~outlier_mask].copy()
+            final_count = len(self.df)
+            
+            print(f"\n✓ Removed {outlier_count} outlier(s)")
+            print(f"  Before: {initial_count} companies")
+            print(f"  After: {final_count} companies")
+            print(f"  Removed: {initial_count - final_count} companies ({((initial_count - final_count) / initial_count) * 100:.2f}%)")
+        else:
+            print("\n✓ No outliers matching Segment 1 characteristics found.")
+            print(f"  Total companies: {initial_count}")
+    
     def preprocess_data(self, exclude_cols: List[str] = None):
         """
         Preprocess data for clustering - FOCUSED ON SPECIFIC COLUMNS ONLY:
@@ -353,19 +446,98 @@ class CompanyIntelligence:
         if len(found_numeric) == 0:
             raise ValueError("None of the target numeric columns were found in the dataset. Please check column names.")
         
-        # Process numeric columns
+        # RISK MITIGATION: Check for missing data (> 50% threshold)
+        print("\n" + "="*50)
+        print("RISK MITIGATION: Missing Data Analysis")
+        print("="*50)
+        missing_threshold = 0.50  # 50% threshold
+        columns_to_drop = []
+        
         for key, col in found_numeric.items():
-            # Handle missing values
+            missing_pct = df_processed[col].isnull().mean()
+            if missing_pct > missing_threshold:
+                print(f"⚠ HIGH RISK: {col} has {missing_pct:.1%} missing data (> 50%) - DROPPING")
+                columns_to_drop.append(key)
+                self.risk_factors['missing_data'] = {
+                    'impact': 'High',
+                    'columns_affected': [col],
+                    'mitigation': f'Dropped columns with > {missing_threshold:.0%} missing data'
+                }
+            elif missing_pct > 0:
+                print(f"  {col}: {missing_pct:.1%} missing - will be handled")
+        
+        # Remove columns with excessive missing data
+        for key in columns_to_drop:
+            if key in found_numeric:
+                del found_numeric[key]
+                print(f"  Removed {key} from analysis due to excessive missing data")
+        
+        # Process numeric columns with outlier mitigation
+        print("\n" + "="*50)
+        print("RISK MITIGATION: Outlier Handling")
+        print("="*50)
+        outlier_columns = []
+        
+        # Apply log10(1+x) transformation to revenue
+        revenue_col = found_numeric.get('revenue')
+        if revenue_col:
+            print(f"\nApplying log10(1+x) transformation to revenue: {revenue_col}")
+            # Store original revenue for reference
+            df_processed[f'{revenue_col}_original'] = df_processed[revenue_col].copy()
+            # Apply log transformation: log10(1 + revenue)
+            df_processed[revenue_col] = np.log10(1 + df_processed[revenue_col].fillna(0))
+            print(f"  ✓ Applied log10(1+x) transformation to revenue")
+        
+        # Filter to only use: revenue (log-transformed), IT budget, and IT spending for clustering
+        clustering_features = []
+        if revenue_col:
+            clustering_features.append(revenue_col)
+        if 'it_budget' in found_numeric:
+            clustering_features.append(found_numeric['it_budget'])
+        if 'it_spending' in found_numeric:
+            clustering_features.append(found_numeric['it_spending'])
+        
+        print(f"\n✓ Clustering will use only: {clustering_features}")
+        
+        for key, col in found_numeric.items():
+            # Handle missing values (for columns with < 50% missing)
             if df_processed[col].isnull().sum() > 0:
                 fill_value = df_processed[col].median() if not pd.isna(df_processed[col].median()) else 0
                 df_processed[col].fillna(fill_value, inplace=True)
                 print(f"  Filled missing values in {col} with {fill_value:.2f}")
             
+            # Only process columns that will be used for clustering
+            if col not in clustering_features:
+                continue
+            
+            # Check for outliers using IQR method
+            Q1 = df_processed[col].quantile(0.25)
+            Q3 = df_processed[col].quantile(0.75)
+            IQR = Q3 - Q1
+            if IQR > 0:
+                lower_bound = Q1 - 1.5 * IQR
+                upper_bound = Q3 + 1.5 * IQR
+                outliers = ((df_processed[col] < lower_bound) | (df_processed[col] > upper_bound)).sum()
+                outlier_pct = (outliers / len(df_processed)) * 100
+                
+                if outlier_pct > 5:  # More than 5% outliers
+                    outlier_columns.append(col)
+                    print(f"⚠ HIGH RISK: {col} has {outlier_pct:.1f}% outliers - will use RobustScaler")
+            
             # Check if column has variance
             if df_processed[col].std() > 0:
-                feature_cols.append(col)
+                if col in clustering_features:
+                    feature_cols.append(col)
             else:
                 print(f"  Warning: {col} has zero variance, skipping")
+        
+        # Store outlier information
+        if outlier_columns:
+            self.risk_factors['outliers'] = {
+                'impact': 'High',
+                'columns_affected': outlier_columns,
+                'mitigation': 'Using RobustScaler for outlier-resistant scaling'
+            }
         
         # Store found columns for later use
         self.found_numeric = found_numeric
@@ -375,33 +547,62 @@ class CompanyIntelligence:
         if len(feature_cols) == 0:
             raise ValueError("No valid numeric features found after preprocessing. Check your data.")
         
-        # Store numeric features
+        # Store numeric features (only clustering features)
         self.feature_names = feature_cols.copy()
         self.df_processed = df_processed[feature_cols].copy()
         
-        # Scale numeric features
-        self.df_processed_scaled = pd.DataFrame(
-            self.scaler.fit_transform(self.df_processed),
-            columns=self.df_processed.columns,
-            index=self.df_processed.index
-        )
-        
-        print(f"\n✓ Processed {len(feature_cols)} numeric features for analysis")
-        print(f"  Numeric Features: {feature_cols}")
-        
-        # Apply TF-IDF to text columns if available
-        if found_text:
-            print(f"\nApplying TF-IDF to {len(found_text)} text column(s)...")
-            self.apply_tfidf(text_columns=list(found_text.values()), max_features=100)
+        # Scale numeric features - Use RobustScaler for columns with outliers
+        print("\nApplying scaling:")
+        if outlier_columns:
+            # Use RobustScaler for outlier-affected columns
+            robust_cols = [col for col in feature_cols if col in outlier_columns]
+            standard_cols = [col for col in feature_cols if col not in outlier_columns]
             
-            # Combine TF-IDF features with numeric features
-            if self.tfidf_features is not None:
-                # Align indices
-                self.df_processed_scaled = pd.concat([
-                    self.df_processed_scaled,
-                    self.tfidf_features.loc[self.df_processed_scaled.index]
-                ], axis=1)
-                print(f"  Combined with {self.tfidf_features.shape[1]} TF-IDF features")
+            scaled_data = {}
+            if robust_cols:
+                robust_scaled = self.robust_scaler.fit_transform(self.df_processed[robust_cols])
+                for i, col in enumerate(robust_cols):
+                    scaled_data[col] = robust_scaled[:, i]
+                print(f"  Used RobustScaler for {len(robust_cols)} columns with outliers: {robust_cols}")
+            
+            if standard_cols:
+                standard_scaled = self.scaler.fit_transform(self.df_processed[standard_cols])
+                for i, col in enumerate(standard_cols):
+                    scaled_data[col] = standard_scaled[:, i]
+                print(f"  Used StandardScaler for {len(standard_cols)} columns: {standard_cols}")
+            
+            self.df_processed_scaled = pd.DataFrame(
+                scaled_data,
+                columns=feature_cols,
+                index=self.df_processed.index
+            )
+        else:
+            # Use StandardScaler if no significant outliers
+            self.df_processed_scaled = pd.DataFrame(
+                self.scaler.fit_transform(self.df_processed),
+                columns=self.df_processed.columns,
+                index=self.df_processed.index
+            )
+            print(f"  Used StandardScaler for all {len(feature_cols)} columns")
+        
+        print(f"\n✓ Processed {len(feature_cols)} numeric features for clustering")
+        print(f"  Clustering Features: {feature_cols}")
+        print(f"  Note: Using only revenue (log10-transformed), IT budget, and IT spending for clustering")
+        
+        # Skip TF-IDF for revenue-based clustering (only using revenue, IT budget, IT spending)
+        # Apply TF-IDF to text columns if available (commented out for focused clustering)
+        # if found_text:
+        #     print(f"\nApplying TF-IDF to {len(found_text)} text column(s)...")
+        #     self.apply_tfidf(text_columns=list(found_text.values()), max_features=100, ngram_range=(2, 2))
+        #     
+        #     # Combine TF-IDF features with numeric features
+        #     if self.tfidf_features is not None:
+        #         # Align indices
+        #         self.df_processed_scaled = pd.concat([
+        #             self.df_processed_scaled,
+        #             self.tfidf_features.loc[self.df_processed_scaled.index]
+        #         ], axis=1)
+        #         print(f"  Combined with {self.tfidf_features.shape[1]} TF-IDF features")
         
         return self.df_processed_scaled
     
@@ -810,16 +1011,19 @@ Format your response in clear, business-friendly language suitable for executive
         
         return "\n".join(insights)
     
-    def apply_tfidf(self, text_columns: List[str] = None, max_features: int = 100):
+    def apply_tfidf(self, text_columns: List[str] = None, max_features: int = 100, ngram_range: Tuple[int, int] = (2, 2)):
         """
         Apply TF-IDF vectorization to text columns (SIC, NAICS, NACE descriptions)
+        RISK MITIGATION: Using N-grams (2,2) to capture phrases like "Software Development"
         
         Args:
             text_columns: List of column names containing text data
             max_features: Maximum number of TF-IDF features to create
+            ngram_range: N-gram range for TF-IDF (default: (2,2) for bigrams to capture phrases)
         """
         print("\n" + "="*50)
         print("TF-IDF FEATURE EXTRACTION")
+        print("RISK MITIGATION: Using N-grams to reduce noise and capture industry phrases")
         print("="*50)
         
         if text_columns is None:
@@ -841,13 +1045,20 @@ Format your response in clear, business-friendly language suitable for executive
         for col in text_columns[1:]:
             combined_text += ' ' + self.df[col].fillna('').astype(str)
         
-        # Apply TF-IDF
+        # Apply TF-IDF with N-grams to capture phrases (e.g., "Software Development")
+        # RISK MITIGATION: Using (2,2) ngrams to reduce noise and capture meaningful industry phrases
         self.tfidf_vectorizer = TfidfVectorizer(
             max_features=max_features,
             stop_words='english',
             lowercase=True,
-            ngram_range=(1, 2)
+            ngram_range=ngram_range  # Default (2,2) for bigrams to capture phrases
         )
+        
+        # Store TF-IDF risk mitigation info
+        self.risk_factors['tfidf_noise'] = {
+            'impact': 'Medium',
+            'mitigation': f'Using N-grams {ngram_range} to capture phrases like "Software Development" in industry clustering'
+        }
         
         try:
             tfidf_matrix = self.tfidf_vectorizer.fit_transform(combined_text)
@@ -897,6 +1108,34 @@ Format your response in clear, business-friendly language suitable for executive
             print("No categorical columns found. Skipping chi-square tests.")
             return None
         
+        # RISK MITIGATION: Limit Chi-Square tests to columns with < 50 unique categories
+        print("\nRISK MITIGATION: High Cardinality Check")
+        print("Limiting Chi-Square tests to columns with < 50 unique categories")
+        high_cardinality_threshold = 50
+        filtered_cols = []
+        high_cardinality_cols = []
+        
+        for col in categorical_cols:
+            unique_count = self.df[col].nunique()
+            if unique_count < high_cardinality_threshold:
+                filtered_cols.append(col)
+                print(f"  ✓ {col}: {unique_count} categories - OK for Chi-Square test")
+            else:
+                high_cardinality_cols.append(col)
+                print(f"  ⚠ {col}: {unique_count} categories (>= {high_cardinality_threshold}) - SKIPPING")
+        
+        if high_cardinality_cols:
+            self.risk_factors['high_cardinality'] = {
+                'impact': 'Medium',
+                'columns_affected': high_cardinality_cols,
+                'mitigation': f'Limited Chi-Square tests to columns with < {high_cardinality_threshold} unique categories'
+            }
+        
+        if not filtered_cols:
+            print("No categorical columns passed the cardinality filter. Skipping chi-square tests.")
+            return None
+        
+        categorical_cols = filtered_cols
         chi_square_results = {}
         
         for col in categorical_cols:
@@ -1769,10 +2008,71 @@ Format your response in clear, business-friendly language suitable for executive
             report.append("")
         
         # ========================================================================
-        # SECTION 7: OVERALL DATA IMPLICATIONS & RECOMMENDATIONS
+        # SECTION 7: RISK FACTORS & MITIGATION STRATEGIES
         # ========================================================================
         report.append("="*80)
-        report.append("7. OVERALL DATA IMPLICATIONS & STRATEGIC RECOMMENDATIONS")
+        report.append("7. RISK FACTORS & MITIGATION STRATEGIES")
+        report.append("="*80)
+        report.append("")
+        
+        if hasattr(self, 'risk_factors') and self.risk_factors:
+            report.append("The following risk factors were identified and mitigated during analysis:")
+            report.append("")
+            
+            # Outliers
+            if 'outliers' in self.risk_factors:
+                risk = self.risk_factors['outliers']
+                report.append("RISK FACTOR: Outliers")
+                report.append(f"  Impact: {risk['impact']}")
+                report.append(f"  Affected Columns: {', '.join(risk['columns_affected'])}")
+                report.append(f"  Mitigation Strategy: {risk['mitigation']}")
+                report.append("  • RobustScaler uses median and IQR, making it resistant to outliers")
+                report.append("  • This ensures revenue/employee counts don't skew clustering results")
+                report.append("")
+            
+            # High Cardinality
+            if 'high_cardinality' in self.risk_factors:
+                risk = self.risk_factors['high_cardinality']
+                report.append("RISK FACTOR: High Cardinality")
+                report.append(f"  Impact: {risk['impact']}")
+                report.append(f"  Affected Columns: {', '.join(risk['columns_affected'])}")
+                report.append(f"  Mitigation Strategy: {risk['mitigation']}")
+                report.append("  • Chi-Square tests are limited to columns with < 50 unique categories")
+                report.append("  • Prevents statistical issues with sparse contingency tables")
+                report.append("")
+            
+            # Missing Data
+            if 'missing_data' in self.risk_factors:
+                risk = self.risk_factors['missing_data']
+                report.append("RISK FACTOR: Missing Data")
+                report.append(f"  Impact: {risk['impact']}")
+                report.append(f"  Affected Columns: {', '.join(risk['columns_affected'])}")
+                report.append(f"  Mitigation Strategy: {risk['mitigation']}")
+                report.append("  • Columns with > 50% missing data are automatically dropped")
+                report.append("  • Remaining missing values are imputed using median values")
+                report.append("  • Ensures data quality for reliable analysis")
+                report.append("")
+            
+            # TF-IDF Noise
+            if 'tfidf_noise' in self.risk_factors:
+                risk = self.risk_factors['tfidf_noise']
+                report.append("RISK FACTOR: TF-IDF Noise")
+                report.append(f"  Impact: {risk['impact']}")
+                report.append(f"  Mitigation Strategy: {risk['mitigation']}")
+                report.append("  • Using N-grams (2,2) captures meaningful industry phrases")
+                report.append("  • Examples: 'Software Development', 'Financial Services', 'Health Care'")
+                report.append("  • Reduces noise from single-word features")
+                report.append("  • Improves industry classification accuracy")
+                report.append("")
+        else:
+            report.append("No significant risk factors identified during analysis.")
+            report.append("")
+        
+        # ========================================================================
+        # SECTION 8: OVERALL DATA IMPLICATIONS & RECOMMENDATIONS
+        # ========================================================================
+        report.append("="*80)
+        report.append("8. OVERALL DATA IMPLICATIONS & STRATEGIC RECOMMENDATIONS")
         report.append("="*80)
         report.append("")
         report.append("KEY FINDINGS:")
@@ -1826,10 +2126,11 @@ Format your response in clear, business-friendly language suitable for executive
         print("\n" + "="*80)
         print("STARTING FOCUSED COMPANY INTELLIGENCE ANALYSIS")
         print("="*80)
-        print("Analyzing: Revenue | Employee Total | Employee Single Sites | Market Value | IT Spending & Budget")
+        print("Clustering: 10 clusters based on Revenue (log10(1+x)), IT Budget, and IT Spending")
+        print("Analyzing: Revenue (log-transformed) | IT Budget | IT Spending")
         print("TF-IDF on: SIC Description | NAICS Description | NACE Rev 2 Description")
         print("Chi-square on: Entity Type | Ownership Type")
-        print("Methods: Logistic Regression | Dimensional Reduction | Train/Test Split")
+        print("Methods: K-Means Clustering | Logistic Regression | Dimensional Reduction | Train/Test Split")
         print("="*80)
         
         # Check if data is loaded
@@ -1841,31 +2142,36 @@ Format your response in clear, business-friendly language suitable for executive
         # 1. Explore data
         self.explore_data()
         
-        # 2. Preprocess
+        # 2. Remove Segment 1 outliers before analysis
+        self.remove_segment1_outliers()
+        
+        # 3. Preprocess
         self.preprocess_data(exclude_cols=exclude_cols)
         
-        # 3. Cluster
+        # 4. Cluster (using 10 clusters based on revenue log10(1+x), IT budget, and IT spending)
+        if n_clusters is None:
+            n_clusters = 10  # Default to 10 clusters for revenue-based clustering
         self.perform_clustering(n_clusters=n_clusters)
         
-        # 4. Apply Chi-square tests on categorical variables
+        # 5. Apply Chi-square tests on categorical variables
         chi_square_results = self.perform_chi_square_test()
         
-        # 5. Analyze clusters
+        # 6. Analyze clusters
         cluster_analysis = self.analyze_clusters()
         
-        # 6. Compare clusters
+        # 7. Compare clusters
         comparison = self.compare_clusters()
         
-        # 7. Identify patterns
+        # 8. Identify patterns
         patterns = self.identify_patterns()
         
-        # 8. Apply dimensional reduction for visualization
+        # 9. Apply dimensional reduction for visualization
         pca_result = self.apply_dimensionality_reduction(method='pca', n_components=3)
         
-        # 9. Train logistic regression (with train/test split and dimensional reduction)
+        # 10. Train logistic regression (with train/test split and dimensional reduction)
         lr_results = self.train_logistic_regression()
         
-        # 10. Train linear regression (optional)
+        # 11. Train linear regression (optional)
         linear_reg_results = None
         try:
             linear_reg_results = self.train_linear_regression()

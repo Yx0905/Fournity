@@ -846,12 +846,23 @@ Format your response in clear, business-friendly language suitable for executive
         print(f"Test set: {X_test.shape[0]} samples")
         
         # Train logistic regression
-        self.logistic_model = LogisticRegression(
-            multi_class='multinomial',
-            solver='lbfgs',
-            max_iter=1000,
-            random_state=random_state
-        )
+        # Use solver='lbfgs' which supports multinomial by default for multi-class
+        try:
+            # Try with multi_class parameter (for newer scikit-learn versions)
+            self.logistic_model = LogisticRegression(
+                multi_class='multinomial',
+                solver='lbfgs',
+                max_iter=1000,
+                random_state=random_state
+            )
+        except TypeError:
+            # Fallback for older scikit-learn versions that don't support multi_class parameter
+            # 'lbfgs' solver automatically handles multinomial for multi-class problems
+            self.logistic_model = LogisticRegression(
+                solver='lbfgs',
+                max_iter=1000,
+                random_state=random_state
+            )
         
         self.logistic_model.fit(X_train, y_train)
         

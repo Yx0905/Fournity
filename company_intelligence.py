@@ -498,6 +498,8 @@ class CompanyIntelligence:
             clustering_features.append(found_numeric['it_spending'])
         
         print(f"\n✓ Clustering will use only: {clustering_features}")
+        if len(clustering_features) < 3:
+            print(f"⚠ Warning: Expected 3 features (revenue, IT budget, IT spending), but only {len(clustering_features)} found.")
         
         for key, col in found_numeric.items():
             # Handle missing values (for columns with < 50% missing)
@@ -588,6 +590,8 @@ class CompanyIntelligence:
         print(f"\n✓ Processed {len(feature_cols)} numeric features for clustering")
         print(f"  Clustering Features: {feature_cols}")
         print(f"  Note: Using only revenue (log10-transformed), IT budget, and IT spending for clustering")
+        if len(feature_cols) < len(clustering_features):
+            print(f"⚠ Warning: {len(clustering_features) - len(feature_cols)} feature(s) were excluded due to zero variance")
         
         # Skip TF-IDF for revenue-based clustering (only using revenue, IT budget, IT spending)
         # Apply TF-IDF to text columns if available (commented out for focused clustering)
@@ -1205,6 +1209,16 @@ Format your response in clear, business-friendly language suitable for executive
         
         if self.df_processed_scaled is None:
             print("Error: Must preprocess data first!")
+            return None
+        
+        # Adjust n_components to not exceed available features
+        max_components = min(self.df_processed_scaled.shape[0], self.df_processed_scaled.shape[1])
+        if n_components > max_components:
+            print(f"⚠ Warning: Requested {n_components} components, but only {max_components} available. Using {max_components} components.")
+            n_components = max_components
+        
+        if n_components < 1:
+            print(f"Error: Cannot reduce to {n_components} components. Need at least 1 feature.")
             return None
         
         reduction_results = {}
@@ -2166,7 +2180,9 @@ Format your response in clear, business-friendly language suitable for executive
         patterns = self.identify_patterns()
         
         # 9. Apply dimensional reduction for visualization
-        pca_result = self.apply_dimensionality_reduction(method='pca', n_components=3)
+        # Use min of 3 and available features
+        max_components = min(3, self.df_processed_scaled.shape[1], self.df_processed_scaled.shape[0])
+        pca_result = self.apply_dimensionality_reduction(method='pca', n_components=max_components)
         
         # 10. Train logistic regression (with train/test split and dimensional reduction)
         lr_results = self.train_logistic_regression()

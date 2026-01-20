@@ -1516,15 +1516,14 @@ Format your response in clear, business-friendly language suitable for executive
             report.append("Silhouette Score Interpretation:")
             report.append("  - Score ranges from -1 to 1")
             report.append("  - Values closer to 1 indicate well-separated clusters")
-            report.append(f"  - Score of {metrics['optimal_silhouette_score']:.4f} indicates: ", end="")
             if metrics['optimal_silhouette_score'] > 0.5:
-                report.append("EXCELLENT cluster separation and cohesion")
+                report.append(f"  - Score of {metrics['optimal_silhouette_score']:.4f} indicates: EXCELLENT cluster separation and cohesion")
             elif metrics['optimal_silhouette_score'] > 0.3:
-                report.append("GOOD cluster structure with reasonable separation")
+                report.append(f"  - Score of {metrics['optimal_silhouette_score']:.4f} indicates: GOOD cluster structure with reasonable separation")
             elif metrics['optimal_silhouette_score'] > 0.1:
-                report.append("FAIR clustering with some overlap between segments")
+                report.append(f"  - Score of {metrics['optimal_silhouette_score']:.4f} indicates: FAIR clustering with some overlap between segments")
             else:
-                report.append("WEAK clustering - segments may not be well-defined")
+                report.append(f"  - Score of {metrics['optimal_silhouette_score']:.4f} indicates: WEAK clustering - segments may not be well-defined")
             report.append("")
             report.append("DATA IMPLICATIONS:")
             report.append("  • The segmentation identifies distinct company groups based on:")

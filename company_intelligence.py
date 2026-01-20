@@ -123,6 +123,26 @@ class CompanyIntelligence:
         if not self.load_data():
             raise ValueError(f"Failed to load data from {self.data_path}. Please check the file path and try again.")
     
+    def _find_column_by_pattern(self, patterns: List[str]) -> Optional[str]:
+        """
+        Find a column by matching patterns (case-insensitive)
+        
+        Args:
+            patterns: List of possible column name patterns to search for
+            
+        Returns:
+            Column name if found, None otherwise
+        """
+        if self.df is None:
+            return None
+        
+        for col in self.df.columns:
+            col_lower = str(col).lower()
+            for pattern in patterns:
+                if pattern.lower() in col_lower:
+                    return col
+        return None
+    
     def load_data(self):
         """Load data from Excel or CSV file"""
         print("Loading data...")
@@ -156,96 +176,225 @@ class CompanyIntelligence:
             return False
     
     def explore_data(self):
-        """Perform initial data exploration"""
+        """Perform initial data exploration - focused on target columns"""
         print("\n" + "="*50)
-        print("DATA EXPLORATION")
+        print("DATA EXPLORATION - FOCUSED COLUMNS")
         print("="*50)
         
-        print(f"\nDataset Shape: {self.df.shape}")
-        print(f"\nMissing Values:")
-        missing = self.df.isnull().sum()
-        missing_pct = (missing / len(self.df)) * 100
-        missing_df = pd.DataFrame({
-            'Missing Count': missing,
-            'Missing %': missing_pct
-        })
-        print(missing_df[missing_df['Missing Count'] > 0])
+        print(f"\nFull Dataset Shape: {self.df.shape}")
         
-        print(f"\nData Types:")
-        print(self.df.dtypes)
+        # Identify target numeric columns
+        numeric_columns = {
+            'revenue': ['revenue', 'revenue_usd', 'annual_revenue', 'total_revenue', 'sales'],
+            'employee_total': ['employee total', 'employee_total', 'employees', 'total_employees', 
+                              'employee_count', 'num_employees', 'employees_total'],
+            'employee_single_sites': ['employee single sites', 'employee_single_sites', 'single_site_employees',
+                                     'employees_single_site', 'single_site_employee_count'],
+            'market_value': ['market value', 'marketvalue', 'market_val', 'market_val_usd', 'market_cap'],
+            'it_spending': ['it spending', 'it_spending', 'it_spend', 'it_spending_usd', 'technology_spending',
+                           'it spending & budget', 'it_spending_budget'],
+            'it_budget': ['it budget', 'it_budget', 'it_budget_usd', 'technology_budget', 'tech_budget']
+        }
         
-        print(f"\nBasic Statistics:")
-        print(self.df.describe())
+        # Identify text columns for TF-IDF
+        text_columns = {
+            'sic_description': ['sic description', 'sic_description', 'sic desc', '8-digit sic description',
+                               '8_digit_sic_description', 'sic_8_digit', 'sic code description'],
+            'naics_description': ['naics description', 'naics_description', 'naics desc', 'naics code description'],
+            'nace_description': ['nace rev 2 description', 'nace_rev_2_description', 'nace description',
+                                'nace_desc', 'nace rev2 description']
+        }
         
-        print(f"\nFirst few rows:")
-        print(self.df.head())
+        # Identify categorical columns
+        categorical_columns = {
+            'entity_type': ['entity type', 'entity_type', 'entity', 'company_type', 'legal_entity_type'],
+            'ownership_type': ['ownership type', 'ownership_type', 'ownership', 'owner_type']
+        }
+        
+        found_numeric = []
+        found_text = []
+        found_categorical = []
+        
+        for key, patterns in numeric_columns.items():
+            col = self._find_column_by_pattern(patterns)
+            if col:
+                found_numeric.append(col)
+        
+        for key, patterns in text_columns.items():
+            col = self._find_column_by_pattern(patterns)
+            if col:
+                found_text.append(col)
+        
+        for key, patterns in categorical_columns.items():
+            col = self._find_column_by_pattern(patterns)
+            if col:
+                found_categorical.append(col)
+        
+        if found_numeric:
+            print(f"\n✓ Found {len(found_numeric)} numeric columns: {found_numeric}")
+            print(f"\nMissing Values in Numeric Columns:")
+            missing = self.df[found_numeric].isnull().sum()
+            missing_pct = (missing / len(self.df)) * 100
+            missing_df = pd.DataFrame({
+                'Missing Count': missing,
+                'Missing %': missing_pct
+            })
+            print(missing_df[missing_df['Missing Count'] > 0] if missing_df['Missing Count'].sum() > 0 else "No missing values!")
+            
+            print(f"\nBasic Statistics for Numeric Columns:")
+            print(self.df[found_numeric].describe())
+        
+        if found_text:
+            print(f"\n✓ Found {len(found_text)} text columns for TF-IDF: {found_text}")
+        
+        if found_categorical:
+            print(f"\n✓ Found {len(found_categorical)} categorical columns for Chi-square: {found_categorical}")
+            for col in found_categorical:
+                print(f"  {col}: {self.df[col].value_counts().head()}")
+        
+        if not found_numeric and not found_text and not found_categorical:
+            print("\n⚠ Warning: Could not find target columns. Showing all columns.")
+            print(f"\nAll Columns: {list(self.df.columns)}")
         
         return self.df
     
     def preprocess_data(self, exclude_cols: List[str] = None):
         """
-        Preprocess data for clustering
+        Preprocess data for clustering - FOCUSED ON SPECIFIC COLUMNS ONLY:
+        - Revenue
+        - Employee Total
+        - Employee Single Sites
+        - Market Value
+        - IT Spending & Budget
+        - Classification columns (SIC, NAICS, NACE) for TF-IDF
+        - Entity Type and Ownership Type for Chi-square tests
         
         Args:
-            exclude_cols: List of column names to exclude from analysis
+            exclude_cols: List of column names to exclude from analysis (not used in focused mode)
         """
         print("\n" + "="*50)
-        print("DATA PREPROCESSING")
+        print("DATA PREPROCESSING - FOCUSED ANALYSIS")
         print("="*50)
-        
-        if exclude_cols is None:
-            exclude_cols = []
+        print("Analyzing: Revenue, Employee Total, Employee Single Sites, Market Value, IT Spending & Budget")
+        print("Using TF-IDF on: SIC Description, NAICS Description, NACE Description")
+        print("Using Chi-square on: Entity Type, Ownership Type")
         
         # Start with a copy
         df_processed = self.df.copy()
         
-        # Identify columns to use
-        numeric_cols = df_processed.select_dtypes(include=[np.number]).columns.tolist()
-        categorical_cols = df_processed.select_dtypes(include=['object', 'category']).columns.tolist()
+        # Define target numeric columns with multiple possible name patterns
+        numeric_columns = {
+            'revenue': ['revenue', 'revenue_usd', 'annual_revenue', 'total_revenue', 'sales'],
+            'employee_total': ['employee total', 'employee_total', 'employees', 'total_employees', 
+                              'employee_count', 'num_employees', 'employees_total'],
+            'employee_single_sites': ['employee single sites', 'employee_single_sites', 'single_site_employees',
+                                     'employees_single_site', 'single_site_employee_count'],
+            'market_value': ['market value', 'marketvalue', 'market_val', 'market_val_usd', 'market_cap'],
+            'it_spending': ['it spending', 'it_spending', 'it_spend', 'it_spending_usd', 'technology_spending',
+                           'it spending & budget', 'it_spending_budget'],
+            'it_budget': ['it budget', 'it_budget', 'it_budget_usd', 'technology_budget', 'tech_budget']
+        }
         
-        # Remove excluded columns
-        numeric_cols = [col for col in numeric_cols if col not in exclude_cols]
-        categorical_cols = [col for col in categorical_cols if col not in exclude_cols]
+        # Define text columns for TF-IDF
+        text_columns = {
+            'sic_description': ['sic description', 'sic_description', 'sic desc', '8-digit sic description',
+                               '8_digit_sic_description', 'sic_8_digit', 'sic code description'],
+            'naics_description': ['naics description', 'naics_description', 'naics desc', 'naics code description'],
+            'nace_description': ['nace rev 2 description', 'nace_rev_2_description', 'nace description',
+                                'nace_desc', 'nace rev2 description']
+        }
         
-        # Handle missing values in numeric columns
-        for col in numeric_cols:
+        # Define categorical columns for Chi-square tests
+        categorical_columns = {
+            'entity_type': ['entity type', 'entity_type', 'entity', 'company_type', 'legal_entity_type'],
+            'ownership_type': ['ownership type', 'ownership_type', 'ownership', 'owner_type']
+        }
+        
+        # Find actual column names in the dataset
+        found_numeric = {}
+        found_text = {}
+        found_categorical = {}
+        feature_cols = []
+        
+        # Find numeric columns
+        for key, patterns in numeric_columns.items():
+            col = self._find_column_by_pattern(patterns)
+            if col:
+                found_numeric[key] = col
+                print(f"✓ Found numeric '{key}': {col}")
+            else:
+                print(f"⚠ Warning: Could not find column for '{key}' (searched: {patterns})")
+        
+        # Find text columns for TF-IDF
+        for key, patterns in text_columns.items():
+            col = self._find_column_by_pattern(patterns)
+            if col:
+                found_text[key] = col
+                print(f"✓ Found text '{key}': {col}")
+            else:
+                print(f"⚠ Warning: Could not find column for '{key}' (searched: {patterns})")
+        
+        # Find categorical columns
+        for key, patterns in categorical_columns.items():
+            col = self._find_column_by_pattern(patterns)
+            if col:
+                found_categorical[key] = col
+                print(f"✓ Found categorical '{key}': {col}")
+            else:
+                print(f"⚠ Warning: Could not find column for '{key}' (searched: {patterns})")
+        
+        if len(found_numeric) == 0:
+            raise ValueError("None of the target numeric columns were found in the dataset. Please check column names.")
+        
+        # Process numeric columns
+        for key, col in found_numeric.items():
+            # Handle missing values
             if df_processed[col].isnull().sum() > 0:
-                # Use median if available, otherwise use 0
                 fill_value = df_processed[col].median() if not pd.isna(df_processed[col].median()) else 0
                 df_processed[col].fillna(fill_value, inplace=True)
+                print(f"  Filled missing values in {col} with {fill_value:.2f}")
+            
+            # Check if column has variance
+            if df_processed[col].std() > 0:
+                feature_cols.append(col)
+            else:
+                print(f"  Warning: {col} has zero variance, skipping")
         
-        # Encode categorical variables
-        encoded_features = []
-        for col in categorical_cols:
-            if df_processed[col].nunique() < 50:  # Only encode if reasonable number of categories
-                le = LabelEncoder()
-                df_processed[f'{col}_encoded'] = le.fit_transform(
-                    df_processed[col].astype(str).fillna('Unknown')
-                )
-                self.label_encoders[col] = le
-                encoded_features.append(f'{col}_encoded')
-        
-        # Combine numeric and encoded features
-        feature_cols = numeric_cols + encoded_features
-        
-        # Remove columns with zero variance
-        feature_cols = [col for col in feature_cols if df_processed[col].std() > 0]
+        # Store found columns for later use
+        self.found_numeric = found_numeric
+        self.found_text = found_text
+        self.found_categorical = found_categorical
         
         if len(feature_cols) == 0:
-            raise ValueError("No valid features found after preprocessing. Check your data.")
+            raise ValueError("No valid numeric features found after preprocessing. Check your data.")
         
-        self.feature_names = feature_cols
+        # Store numeric features
+        self.feature_names = feature_cols.copy()
         self.df_processed = df_processed[feature_cols].copy()
         
-        # Scale features
+        # Scale numeric features
         self.df_processed_scaled = pd.DataFrame(
             self.scaler.fit_transform(self.df_processed),
             columns=self.df_processed.columns,
             index=self.df_processed.index
         )
         
-        print(f"\nProcessed {len(feature_cols)} features for analysis")
-        print(f"Features: {feature_cols[:10]}..." if len(feature_cols) > 10 else f"Features: {feature_cols}")
+        print(f"\n✓ Processed {len(feature_cols)} numeric features for analysis")
+        print(f"  Numeric Features: {feature_cols}")
+        
+        # Apply TF-IDF to text columns if available
+        if found_text:
+            print(f"\nApplying TF-IDF to {len(found_text)} text column(s)...")
+            self.apply_tfidf(text_columns=list(found_text.values()), max_features=100)
+            
+            # Combine TF-IDF features with numeric features
+            if self.tfidf_features is not None:
+                # Align indices
+                self.df_processed_scaled = pd.concat([
+                    self.df_processed_scaled,
+                    self.tfidf_features.loc[self.df_processed_scaled.index]
+                ], axis=1)
+                print(f"  Combined with {self.tfidf_features.shape[1]} TF-IDF features")
         
         return self.df_processed_scaled
     
@@ -336,54 +485,77 @@ class CompanyIntelligence:
         return self.clusters
     
     def analyze_clusters(self):
-        """Analyze characteristics of each cluster"""
+        """Analyze characteristics of each cluster - FOCUSED ON TARGET COLUMNS ONLY"""
         print("\n" + "="*50)
-        print("CLUSTER ANALYSIS")
+        print("CLUSTER ANALYSIS - FOCUSED COLUMNS")
         print("="*50)
         
         cluster_analysis = {}
         
-        # Analyze numeric features
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
-        numeric_cols = [col for col in numeric_cols if col != 'Cluster']
+        # Get target columns from preprocessing
+        if not hasattr(self, 'found_numeric') or not self.found_numeric:
+            print("Warning: Target columns not found. Re-running preprocessing...")
+            self.preprocess_data()
+        
+        # Get numeric columns
+        numeric_cols = list(self.found_numeric.values())
+        
+        # Get categorical columns
+        categorical_cols = list(self.found_categorical.values()) if hasattr(self, 'found_categorical') and self.found_categorical else []
         
         for cluster_id in sorted(self.df['Cluster'].unique()):
             cluster_data = self.df[self.df['Cluster'] == cluster_id]
             cluster_analysis[cluster_id] = {
                 'size': len(cluster_data),
                 'percentage': (len(cluster_data) / len(self.df)) * 100,
-                'numeric_stats': cluster_data[numeric_cols].describe().to_dict() if numeric_cols else {},
+                'numeric_stats': {},
                 'categorical_profiles': {}
             }
             
+            # Analyze numeric target features
+            if numeric_cols:
+                cluster_analysis[cluster_id]['numeric_stats'] = cluster_data[numeric_cols].describe().to_dict()
+            
             # Analyze categorical features
-            categorical_cols = self.df.select_dtypes(include=['object', 'category']).columns.tolist()
-            for col in categorical_cols:
-                if col != 'Cluster':
-                    value_counts = cluster_data[col].value_counts(normalize=True).head(5)
-                    cluster_analysis[cluster_id]['categorical_profiles'][col] = value_counts.to_dict()
+            for cat_col in categorical_cols:
+                value_counts = cluster_data[cat_col].value_counts(normalize=True)
+                cluster_analysis[cluster_id]['categorical_profiles'][cat_col] = value_counts.to_dict()
             
             print(f"\nCluster {cluster_id}:")
             print(f"  Size: {cluster_analysis[cluster_id]['size']} companies ({cluster_analysis[cluster_id]['percentage']:.1f}%)")
+            if numeric_cols:
+                print(f"  Key Metrics:")
+                for col in numeric_cols:
+                    mean_val = cluster_data[col].mean()
+                    print(f"    {col}: {mean_val:,.2f}")
+            if categorical_cols:
+                for cat_col in categorical_cols:
+                    top_value = cluster_data[cat_col].mode()[0] if len(cluster_data[cat_col].mode()) > 0 else "N/A"
+                    print(f"  Top {cat_col}: {top_value}")
         
         return cluster_analysis
     
     def compare_clusters(self, feature: str = None):
         """
-        Compare clusters across different features
+        Compare clusters across TARGET FEATURES ONLY:
+        Revenue, Employee Total, Employee Single Sites, Market Value, IT Spending & Budget
         
         Args:
-            feature: Specific feature to compare (if None, compares key features)
+            feature: Specific feature to compare (if None, compares all target features)
         """
         print("\n" + "="*50)
-        print("CLUSTER COMPARISON")
+        print("CLUSTER COMPARISON - TARGET FEATURES")
         print("="*50)
         
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
-        numeric_cols = [col for col in numeric_cols if col != 'Cluster']
+        # Get target columns
+        if not hasattr(self, 'found_numeric') or not self.found_numeric:
+            print("Warning: Target columns not found. Re-running preprocessing...")
+            self.preprocess_data()
+        
+        numeric_cols = list(self.found_numeric.values())
         
         if not numeric_cols:
-            print("Warning: No numeric columns available for comparison.")
+            print("Warning: No target numeric columns available for comparison.")
             return pd.DataFrame()
         
         comparison = None
@@ -393,21 +565,17 @@ class CompanyIntelligence:
             print(f"\nComparison of {feature} across clusters:")
             print(comparison)
         else:
-            # Compare key numeric features
-            print("\nKey feature comparison across clusters:")
-            key_features = numeric_cols[:10]  # Top 10 numeric features
-            if key_features:
-                comparison = self.df.groupby('Cluster')[key_features].mean()
-                print(comparison.round(2))
-            else:
-                comparison = pd.DataFrame()
+            # Compare all target numeric features
+            print("\nTarget feature comparison across clusters:")
+            comparison = self.df.groupby('Cluster')[numeric_cols].agg(['mean', 'std'])
+            print(comparison.round(2))
         
         return comparison if comparison is not None else pd.DataFrame()
     
     def identify_patterns(self):
-        """Identify notable patterns, strengths, risks, and anomalies"""
+        """Identify notable patterns, strengths, risks, and anomalies - FOCUSED ON TARGET COLUMNS"""
         print("\n" + "="*50)
-        print("PATTERN IDENTIFICATION")
+        print("PATTERN IDENTIFICATION - TARGET COLUMNS")
         print("="*50)
         
         patterns = {
@@ -417,12 +585,15 @@ class CompanyIntelligence:
             'anomalies': []
         }
         
-        # Identify outliers using IQR method
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
-        numeric_cols = [col for col in numeric_cols if col != 'Cluster']
+        # Get target columns
+        if not hasattr(self, 'found_numeric') or not self.found_numeric:
+            print("Warning: Target columns not found. Re-running preprocessing...")
+            self.preprocess_data()
+        
+        numeric_cols = list(self.found_numeric.values())
         
         if numeric_cols:
-            for col in numeric_cols[:10]:  # Check top 10 numeric features
+            for col in numeric_cols:  # Check all target numeric features
                 try:
                     Q1 = self.df[col].quantile(0.25)
                     Q3 = self.df[col].quantile(0.75)
@@ -446,12 +617,14 @@ class CompanyIntelligence:
                     # Skip columns that cause errors
                     continue
         
-        # Calculate correlations
+        # Calculate correlations between target features
         if len(numeric_cols) > 1:
-            corr_matrix = self.df[numeric_cols[:10]].corr()
+            corr_matrix = self.df[numeric_cols].corr()
             patterns['correlations'] = corr_matrix.to_dict()
+            print(f"\nCorrelations between target features:")
+            print(corr_matrix.round(3))
         
-        # Identify cluster differences
+        # Identify cluster differences in target features
         if numeric_cols:
             for cluster_id in sorted(self.df['Cluster'].unique()):
                 cluster_data = self.df[self.df['Cluster'] == cluster_id]
@@ -461,7 +634,7 @@ class CompanyIntelligence:
                     continue
                 
                 differences = {}
-                for col in numeric_cols[:5]:  # Top 5 features
+                for col in numeric_cols:  # All target features
                     try:
                         cluster_mean = cluster_data[col].mean()
                         other_mean = other_data[col].mean()
@@ -619,7 +792,7 @@ Format your response in clear, business-friendly language suitable for executive
     
     def apply_tfidf(self, text_columns: List[str] = None, max_features: int = 100):
         """
-        Apply TF-IDF vectorization to text columns
+        Apply TF-IDF vectorization to text columns (SIC, NAICS, NACE descriptions)
         
         Args:
             text_columns: List of column names containing text data
@@ -630,20 +803,12 @@ Format your response in clear, business-friendly language suitable for executive
         print("="*50)
         
         if text_columns is None:
-            # Automatically detect text columns (object type with high cardinality)
-            text_columns = []
-            categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
-            for col in categorical_cols:
-                try:
-                    # Check if column might contain text descriptions
-                    sample_values = self.df[col].dropna().head(10)
-                    if len(sample_values) == 0:
-                        continue
-                    avg_length = sample_values.astype(str).str.len().mean()
-                    if not pd.isna(avg_length) and avg_length > 20:  # Likely text if average length > 20 chars
-                        text_columns.append(col)
-                except Exception:
-                    continue
+            # Use found text columns from preprocessing
+            if hasattr(self, 'found_text') and self.found_text:
+                text_columns = list(self.found_text.values())
+            else:
+                print("No text columns specified. Skipping TF-IDF feature extraction.")
+                return None
         
         if not text_columns:
             print("No text columns found for TF-IDF. Skipping TF-IDF feature extraction.")
@@ -672,7 +837,7 @@ Format your response in clear, business-friendly language suitable for executive
                 index=self.df.index
             )
             
-            print(f"Created {self.tfidf_features.shape[1]} TF-IDF features")
+            print(f"✓ Created {self.tfidf_features.shape[1]} TF-IDF features")
             
             # Show top terms
             feature_names = self.tfidf_vectorizer.get_feature_names_out()
@@ -685,10 +850,10 @@ Format your response in clear, business-friendly language suitable for executive
     
     def perform_chi_square_test(self, categorical_cols: List[str] = None):
         """
-        Perform Chi-square test of independence between categorical variables and clusters
+        Perform Chi-square test of independence between categorical variables (Entity Type, Ownership Type) and clusters
         
         Args:
-            categorical_cols: List of categorical column names to test
+            categorical_cols: List of categorical column names to test (defaults to Entity Type and Ownership Type)
         """
         print("\n" + "="*50)
         print("CHI-SQUARE TEST ANALYSIS")
@@ -699,8 +864,16 @@ Format your response in clear, business-friendly language suitable for executive
             return None
         
         if categorical_cols is None:
-            categorical_cols = self.df.select_dtypes(include=['object', 'category']).columns.tolist()
-            categorical_cols = [col for col in categorical_cols if col != 'Cluster']
+            # Use found categorical columns from preprocessing
+            if hasattr(self, 'found_categorical') and self.found_categorical:
+                categorical_cols = list(self.found_categorical.values())
+            else:
+                print("No categorical columns specified. Skipping chi-square tests.")
+                return None
+        
+        if not categorical_cols:
+            print("No categorical columns found. Skipping chi-square tests.")
+            return None
         
         chi_square_results = {}
         
@@ -708,6 +881,11 @@ Format your response in clear, business-friendly language suitable for executive
             try:
                 # Create contingency table
                 contingency = pd.crosstab(self.df[col], self.df['Cluster'])
+                
+                # Check if table is valid (at least 2x2)
+                if contingency.shape[0] < 2 or contingency.shape[1] < 2:
+                    print(f"  Skipping {col}: insufficient categories for chi-square test")
+                    continue
                 
                 # Perform chi-square test
                 chi2, p_value, dof, expected = chi2_contingency(contingency)
@@ -732,11 +910,12 @@ Format your response in clear, business-friendly language suitable for executive
                 continue
         
         # Summary
-        significant_vars = [col for col, result in chi_square_results.items() 
-                          if result['is_significant']]
-        print(f"\n{'='*50}")
-        print(f"Summary: {len(significant_vars)}/{len(chi_square_results)} categorical variables "
-              f"show significant association with clusters")
+        if chi_square_results:
+            significant_vars = [col for col, result in chi_square_results.items() 
+                              if result['is_significant']]
+            print(f"\n{'='*50}")
+            print(f"Summary: {len(significant_vars)}/{len(chi_square_results)} categorical variables "
+                  f"show significant association with clusters")
         
         return chi_square_results
     
@@ -800,7 +979,10 @@ Format your response in clear, business-friendly language suitable for executive
     
     def train_logistic_regression(self, test_size: float = 0.2, random_state: int = 42):
         """
-        Train logistic regression model to predict cluster membership
+        Train logistic regression model to predict cluster membership using:
+        - Numeric features: Revenue, Employee Total, Employee Single Sites, Market Value, IT Spending & Budget
+        - TF-IDF features: From SIC, NAICS, NACE descriptions
+        - Dimensional reduction applied to combined features
         
         Args:
             test_size: Proportion of data to use for testing
@@ -809,6 +991,7 @@ Format your response in clear, business-friendly language suitable for executive
         print("\n" + "="*50)
         print("LOGISTIC REGRESSION - CLUSTER PREDICTION")
         print("="*50)
+        print("Using: Numeric features + TF-IDF features + Dimensional reduction")
         
         if self.clusters is None:
             print("Error: Must perform clustering first!")
@@ -818,16 +1001,22 @@ Format your response in clear, business-friendly language suitable for executive
             print("Error: Must preprocess data first!")
             return None
         
-        # Prepare features and target
-        X = self.df_processed_scaled.values
+        # Apply dimensional reduction to combined features
+        print("\nApplying dimensional reduction to features...")
+        reduction_result = self.apply_dimensionality_reduction(method='pca', n_components=min(50, self.df_processed_scaled.shape[1]))
+        
+        if reduction_result and 'reduced_data' in reduction_result:
+            X = reduction_result['reduced_data']
+            print(f"Reduced features from {self.df_processed_scaled.shape[1]} to {X.shape[1]} dimensions")
+            print(f"Explained variance: {sum(reduction_result['explained_variance']):.2%}")
+        else:
+            # Fallback to original features if reduction fails
+            X = self.df_processed_scaled.values
+            print("Using original features (dimensional reduction not applied)")
+        
         y = self.clusters
         
-        # Combine with TF-IDF features if available
-        if self.tfidf_features is not None:
-            print("Combining features with TF-IDF features...")
-            X = np.hstack([X, self.tfidf_features.values])
-        
-        # Split data
+        # Split data with train/test split
         # Check if stratification is possible (each class needs at least 2 samples)
         unique, counts = np.unique(y, return_counts=True)
         can_stratify = all(counts >= 2) and len(unique) > 1
@@ -842,8 +1031,8 @@ Format your response in clear, business-friendly language suitable for executive
                 X, y, test_size=test_size, random_state=random_state
             )
         
-        print(f"Training set: {X_train.shape[0]} samples")
-        print(f"Test set: {X_test.shape[0]} samples")
+        print(f"\nTraining set: {X_train.shape[0]} samples, {X_train.shape[1]} features")
+        print(f"Test set: {X_test.shape[0]} samples, {X_test.shape[1]} features")
         
         # Train logistic regression
         # Use solver='lbfgs' which supports multinomial by default for multi-class
@@ -881,71 +1070,82 @@ Format your response in clear, business-friendly language suitable for executive
         print("\nClassification Report (Test Set):")
         print(classification_report(y_test, y_test_pred))
         
-        # Feature importance (coefficients)
-        if self.logistic_model.n_features_in_ < 20:
-            print("\nFeature Importance (Top coefficients per cluster):")
-            feature_names = list(self.feature_names)
-            if self.tfidf_features is not None:
-                feature_names += list(self.tfidf_features.columns)
-            
+        # Feature importance (coefficients) - for reduced dimensions
+        if hasattr(self.logistic_model, 'n_features_in_') and self.logistic_model.n_features_in_ < 50:
+            print("\nTop contributing features per cluster:")
             for i, cluster_id in enumerate(sorted(set(y))):
                 print(f"\nCluster {cluster_id}:")
                 coefs = self.logistic_model.coef_[i]
                 top_indices = np.argsort(np.abs(coefs))[-5:][::-1]
                 for idx in top_indices:
-                    if idx < len(feature_names):
-                        print(f"  {feature_names[idx]}: {coefs[idx]:.4f}")
+                    print(f"  Component {idx}: {coefs[idx]:.4f}")
         
         results = {
             'model': self.logistic_model,
             'train_accuracy': train_accuracy,
             'test_accuracy': test_accuracy,
             'classification_report': classification_report(y_test, y_test_pred, output_dict=True),
-            'confusion_matrix': confusion_matrix(y_test, y_test_pred)
+            'confusion_matrix': confusion_matrix(y_test, y_test_pred),
+            'dimensional_reduction': reduction_result
         }
         
         return results
     
     def train_linear_regression(self, target_feature: str = None, test_size: float = 0.2, random_state: int = 42):
         """
-        Train linear regression model to predict a target feature
+        Train linear regression model to predict a TARGET FEATURE (Revenue or Market Value)
         
         Args:
-            target_feature: Name of the target feature to predict (if None, uses first numeric column)
+            target_feature: Name of the target feature to predict ('revenue' or 'market_value')
+                          If None, uses 'revenue' as default
             test_size: Proportion of data to use for testing
             random_state: Random seed for reproducibility
         """
         print("\n" + "="*50)
-        print("LINEAR REGRESSION - FEATURE PREDICTION")
+        print("LINEAR REGRESSION - TARGET FEATURE PREDICTION")
         print("="*50)
         
         if self.df_processed_scaled is None:
             print("Error: Must preprocess data first!")
             return None
         
-        # Select target feature
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
-        numeric_cols = [col for col in numeric_cols if col != 'Cluster']
+        # Get target columns
+        if not hasattr(self, 'found_numeric') or not self.found_numeric:
+            print("Warning: Target columns not found. Re-running preprocessing...")
+            self.preprocess_data()
         
-        if not numeric_cols:
-            print("Error: No numeric features available for linear regression!")
-            return None
-        
+        # Select target feature from target columns
         if target_feature is None:
-            target_feature = numeric_cols[0]
-            print(f"No target feature specified. Using first numeric column: {target_feature}")
-        elif target_feature not in numeric_cols:
-            print(f"Warning: {target_feature} not found. Using first numeric column: {numeric_cols[0]}")
-            target_feature = numeric_cols[0]
+            # Default to revenue
+            if 'revenue' in self.found_numeric:
+                target_feature = self.found_numeric['revenue']
+                print(f"Using default target: Revenue")
+            elif 'market_value' in self.found_numeric:
+                target_feature = self.found_numeric['market_value']
+                print(f"Using default target: Market Value")
+            else:
+                print("Error: No suitable target feature found (revenue or market_value)!")
+                return None
+        else:
+            # Find the actual column name
+            target_key = None
+            if 'revenue' in target_feature.lower():
+                target_key = 'revenue'
+            elif 'market' in target_feature.lower() and 'value' in target_feature.lower():
+                target_key = 'market_value'
+            
+            if target_key and target_key in self.found_numeric:
+                target_feature = self.found_numeric[target_key]
+            elif target_feature not in self.df.columns:
+                print(f"Warning: {target_feature} not found. Using revenue as default.")
+                if 'revenue' in self.found_numeric:
+                    target_feature = self.found_numeric['revenue']
+                else:
+                    return None
         
         # Prepare features and target
         X = self.df_processed_scaled.values
         y = self.df[target_feature].values
-        
-        # Combine with TF-IDF features if available
-        if self.tfidf_features is not None:
-            print("Combining features with TF-IDF features...")
-            X = np.hstack([X, self.tfidf_features.values])
         
         # Remove rows with missing target values
         valid_mask = ~np.isnan(y)
@@ -1132,22 +1332,37 @@ Format your response in clear, business-friendly language suitable for executive
             plt.close()
             print("Saved pca_clusters.png")
         
-        # 3. Feature comparison across clusters
-        numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
-        numeric_cols = [col for col in numeric_cols if col != 'Cluster']
+        # 3. Feature comparison across clusters - TARGET FEATURES ONLY
+        # Get target columns
+        if hasattr(self, 'found_numeric') and self.found_numeric:
+            numeric_cols = list(self.found_numeric.values())
+        else:
+            numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
+            numeric_cols = [col for col in numeric_cols if col != 'Cluster']
         
         if numeric_cols:
-            # Select top 6 features for comparison
+            # Use all target features (up to 6)
             top_features = numeric_cols[:6]
-            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-            axes = axes.flatten()
+            n_features = len(top_features)
+            n_cols = min(3, n_features)
+            n_rows = (n_features + n_cols - 1) // n_cols
+            
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 4*n_rows))
+            if n_features == 1:
+                axes = [axes]
+            else:
+                axes = axes.flatten() if n_rows > 1 else [axes] if n_cols == 1 else axes
             
             for idx, feature in enumerate(top_features):
                 self.df.boxplot(column=feature, by='Cluster', ax=axes[idx])
                 axes[idx].set_title(f'{feature} by Cluster')
                 axes[idx].set_xlabel('Cluster')
             
-            plt.suptitle('Feature Comparison Across Clusters', y=1.02)
+            # Hide extra subplots
+            for idx in range(n_features, len(axes)):
+                axes[idx].set_visible(False)
+            
+            plt.suptitle('Target Feature Comparison Across Clusters', y=1.02)
             plt.tight_layout()
             plt.savefig('feature_comparison.png', dpi=300, bbox_inches='tight')
             plt.close()
@@ -1249,7 +1464,12 @@ Format your response in clear, business-friendly language suitable for executive
     def run_full_analysis(self, n_clusters: int = None, exclude_cols: List[str] = None):
         """Run the complete analysis pipeline"""
         print("\n" + "="*80)
-        print("STARTING FULL COMPANY INTELLIGENCE ANALYSIS")
+        print("STARTING FOCUSED COMPANY INTELLIGENCE ANALYSIS")
+        print("="*80)
+        print("Analyzing: Revenue | Employee Total | Employee Single Sites | Market Value | IT Spending & Budget")
+        print("TF-IDF on: SIC Description | NAICS Description | NACE Rev 2 Description")
+        print("Chi-square on: Entity Type | Ownership Type")
+        print("Methods: Logistic Regression | Dimensional Reduction | Train/Test Split")
         print("="*80)
         
         # Check if data is loaded
@@ -1267,48 +1487,50 @@ Format your response in clear, business-friendly language suitable for executive
         # 3. Cluster
         self.perform_clustering(n_clusters=n_clusters)
         
-        # 4. Analyze clusters
-        cluster_analysis = self.analyze_clusters()
-        
-        # 5. Compare clusters
-        comparison = self.compare_clusters()
-        
-        # 6. Identify patterns
-        patterns = self.identify_patterns()
-        
-        # 7. Apply TF-IDF (if text columns exist)
-        tfidf_features = self.apply_tfidf()
-        
-        # 8. Perform Chi-square tests
+        # 4. Apply Chi-square tests on categorical variables
         chi_square_results = self.perform_chi_square_test()
         
-        # 9. Apply additional dimensionality reduction
-        dim_reduction_results = {}
-        for method in ['pca', 'svd']:
-            result = self.apply_dimensionality_reduction(method=method, n_components=3)
-            if result:
-                dim_reduction_results[method] = result
+        # 5. Analyze clusters
+        cluster_analysis = self.analyze_clusters()
         
-        # 10. Train logistic regression
+        # 6. Compare clusters
+        comparison = self.compare_clusters()
+        
+        # 7. Identify patterns
+        patterns = self.identify_patterns()
+        
+        # 8. Apply dimensional reduction for visualization
+        pca_result = self.apply_dimensionality_reduction(method='pca', n_components=3)
+        
+        # 9. Train logistic regression (with train/test split and dimensional reduction)
         lr_results = self.train_logistic_regression()
         
-        # 11. Train linear regression
-        linear_reg_results = self.train_linear_regression()
+        # 10. Train linear regression (optional)
+        linear_reg_results = None
+        try:
+            linear_reg_results = self.train_linear_regression()
+        except Exception as e:
+            print(f"Linear regression skipped: {e}")
         
         # 12. Generate insights
         insights = self.generate_llm_insights(cluster_analysis, patterns)
         
         # 13. Visualize
         self.visualize_results()
-        self.visualize_dimensionality_reduction(['pca', 'svd'])
         
         # 14. Add new results to patterns
-        if chi_square_results:
-            patterns['chi_square'] = chi_square_results
         if lr_results:
             patterns['logistic_regression'] = {
                 'train_accuracy': lr_results['train_accuracy'],
                 'test_accuracy': lr_results['test_accuracy']
+            }
+        if chi_square_results:
+            patterns['chi_square'] = {
+                col: {
+                    'p_value': result['p_value'],
+                    'is_significant': result['is_significant']
+                }
+                for col, result in chi_square_results.items()
             }
         if linear_reg_results:
             patterns['linear_regression'] = {
@@ -1336,7 +1558,6 @@ Format your response in clear, business-friendly language suitable for executive
         print("  - feature_comparison.png (feature analysis)")
         print("  - interactive_clusters.html (interactive 3D visualization)")
         print("  - optimal_clusters.png (cluster selection)")
-        print("  - dimensionality_reduction.png (multiple reduction methods)")
         print("  - linear_regression_results.png (linear regression visualization)")
         
         # Build return dictionary
@@ -1348,16 +1569,14 @@ Format your response in clear, business-friendly language suitable for executive
         }
         
         # Add new analysis results
-        if chi_square_results:
-            return_dict['chi_square_results'] = chi_square_results
         if lr_results:
             return_dict['logistic_regression'] = lr_results
+        if chi_square_results:
+            return_dict['chi_square'] = chi_square_results
         if linear_reg_results:
             return_dict['linear_regression'] = linear_reg_results
-        if dim_reduction_results:
-            return_dict['dimensionality_reduction'] = dim_reduction_results
-        if tfidf_features is not None:
-            return_dict['tfidf_features'] = tfidf_features
+        if pca_result:
+            return_dict['pca_result'] = pca_result
         
         return return_dict
 

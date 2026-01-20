@@ -77,6 +77,13 @@ class CompanyIntelligence:
         self.tfidf_features = None
         self.api_provider = None
         
+        # Analysis metrics storage
+        self.segmentation_metrics = None
+        self.trend_metrics = None
+        self.driver_metrics = None
+        self.performance_metrics = None
+        self.pca_metrics = None
+        
         # Initialize LLM client if available
         self.client = None
         self.use_llm = False
@@ -401,12 +408,14 @@ class CompanyIntelligence:
     def determine_optimal_clusters(self, max_k: int = 10):
         """
         Determine optimal number of clusters using elbow method and silhouette score
+        SEGMENTATION: Silhouette Score / Elbow Method
         
         Args:
             max_k: Maximum number of clusters to test
         """
         print("\n" + "="*50)
-        print("DETERMINING OPTIMAL CLUSTERS")
+        print("SEGMENTATION: DETERMINING OPTIMAL CLUSTERS")
+        print("Method: Silhouette Score / Elbow Method")
         print("="*50)
         
         inertias = []
@@ -427,7 +436,18 @@ class CompanyIntelligence:
         
         # Find optimal k (elbow method + silhouette)
         optimal_k = k_range[np.argmax(silhouette_scores)]
+        optimal_silhouette = max(silhouette_scores)
         print(f"\nOptimal number of clusters: {optimal_k} (based on silhouette score)")
+        print(f"Optimal Silhouette Score: {optimal_silhouette:.4f}")
+        
+        # Store segmentation metrics
+        self.segmentation_metrics = {
+            'optimal_k': optimal_k,
+            'optimal_silhouette_score': optimal_silhouette,
+            'silhouette_scores': dict(zip(k_range, silhouette_scores)),
+            'inertias': dict(zip(k_range, inertias)),
+            'method': 'Silhouette Score / Elbow Method'
+        }
         
         # Plot elbow curve
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
@@ -851,12 +871,14 @@ Format your response in clear, business-friendly language suitable for executive
     def perform_chi_square_test(self, categorical_cols: List[str] = None):
         """
         Perform Chi-square test of independence between categorical variables (Entity Type, Ownership Type) and clusters
+        FINDING TRENDS: Chi-Square Test
         
         Args:
             categorical_cols: List of categorical column names to test (defaults to Entity Type and Ownership Type)
         """
         print("\n" + "="*50)
-        print("CHI-SQUARE TEST ANALYSIS")
+        print("FINDING TRENDS: CHI-SQUARE TEST ANALYSIS")
+        print("Method: Chi-Square Test of Independence")
         print("="*50)
         
         if self.clusters is None:
@@ -916,19 +938,30 @@ Format your response in clear, business-friendly language suitable for executive
             print(f"\n{'='*50}")
             print(f"Summary: {len(significant_vars)}/{len(chi_square_results)} categorical variables "
                   f"show significant association with clusters")
+            
+            # Store trend finding metrics
+            self.trend_metrics = {
+                'chi_square_results': chi_square_results,
+                'significant_variables': significant_vars,
+                'total_tested': len(chi_square_results),
+                'significant_count': len(significant_vars),
+                'method': 'Chi-Square Test'
+            }
         
         return chi_square_results
     
     def apply_dimensionality_reduction(self, method: str = 'pca', n_components: int = 2):
         """
         Apply dimensionality reduction techniques
+        SIMPLIFYING COMPLEX DATA: PCA Explained Variance
         
         Args:
             method: Method to use ('pca', 'tsne', 'umap', 'svd')
             n_components: Number of components for reduction
         """
         print("\n" + "="*50)
-        print(f"DIMENSIONALITY REDUCTION: {method.upper()}")
+        print(f"SIMPLIFYING COMPLEX DATA: DIMENSIONALITY REDUCTION")
+        print(f"Method: {method.upper()} - Explained Variance")
         print("="*50)
         
         if self.df_processed_scaled is None:
@@ -941,15 +974,37 @@ Format your response in clear, business-friendly language suitable for executive
             reducer = PCA(n_components=n_components)
             reduced_data = reducer.fit_transform(self.df_processed_scaled)
             reduction_results['explained_variance'] = reducer.explained_variance_ratio_
+            total_variance = sum(reduction_results['explained_variance'])
             print(f"PCA: Explained variance ratio: {reduction_results['explained_variance']}")
-            print(f"Total variance explained: {sum(reduction_results['explained_variance']):.2%}")
+            print(f"Total variance explained: {total_variance:.2%}")
+            
+            # Store PCA metrics
+            self.pca_metrics = {
+                'method': 'PCA',
+                'n_components': n_components,
+                'explained_variance_ratio': reduction_results['explained_variance'].tolist(),
+                'total_variance_explained': float(total_variance),
+                'original_dimensions': self.df_processed_scaled.shape[1],
+                'reduced_dimensions': n_components
+            }
             
         elif method.lower() == 'svd' or method.lower() == 'truncated_svd':
             reducer = TruncatedSVD(n_components=n_components, random_state=42)
             reduced_data = reducer.fit_transform(self.df_processed_scaled)
             reduction_results['explained_variance'] = reducer.explained_variance_ratio_
+            total_variance = sum(reduction_results['explained_variance'])
             print(f"TruncatedSVD: Explained variance ratio: {reduction_results['explained_variance']}")
-            print(f"Total variance explained: {sum(reduction_results['explained_variance']):.2%}")
+            print(f"Total variance explained: {total_variance:.2%}")
+            
+            # Store SVD metrics
+            self.pca_metrics = {
+                'method': 'TruncatedSVD',
+                'n_components': n_components,
+                'explained_variance_ratio': reduction_results['explained_variance'].tolist(),
+                'total_variance_explained': float(total_variance),
+                'original_dimensions': self.df_processed_scaled.shape[1],
+                'reduced_dimensions': n_components
+            }
             
         elif method.lower() == 'tsne':
             if not HAS_TSNE:
@@ -1071,14 +1126,25 @@ Format your response in clear, business-friendly language suitable for executive
         print(classification_report(y_test, y_test_pred))
         
         # Feature importance (coefficients) - for reduced dimensions
+        driver_coefficients = {}
         if hasattr(self.logistic_model, 'n_features_in_') and self.logistic_model.n_features_in_ < 50:
-            print("\nTop contributing features per cluster:")
+            print("\nDRIVER IDENTIFICATION: Top contributing features per cluster:")
             for i, cluster_id in enumerate(sorted(set(y))):
                 print(f"\nCluster {cluster_id}:")
                 coefs = self.logistic_model.coef_[i]
                 top_indices = np.argsort(np.abs(coefs))[-5:][::-1]
+                driver_coefficients[cluster_id] = {}
                 for idx in top_indices:
+                    driver_coefficients[cluster_id][f'Component_{idx}'] = float(coefs[idx])
                     print(f"  Component {idx}: {coefs[idx]:.4f}")
+        
+        # Store driver identification metrics
+        self.driver_metrics = {
+            'coefficients': driver_coefficients,
+            'train_accuracy': train_accuracy,
+            'test_accuracy': test_accuracy,
+            'method': 'Logistic Regression (Coefficients)'
+        }
         
         results = {
             'model': self.logistic_model,
@@ -1086,7 +1152,8 @@ Format your response in clear, business-friendly language suitable for executive
             'test_accuracy': test_accuracy,
             'classification_report': classification_report(y_test, y_test_pred, output_dict=True),
             'confusion_matrix': confusion_matrix(y_test, y_test_pred),
-            'dimensional_reduction': reduction_result
+            'dimensional_reduction': reduction_result,
+            'coefficients': driver_coefficients
         }
         
         return results
@@ -1102,7 +1169,8 @@ Format your response in clear, business-friendly language suitable for executive
             random_state: Random seed for reproducibility
         """
         print("\n" + "="*50)
-        print("LINEAR REGRESSION - TARGET FEATURE PREDICTION")
+        print("PERFORMANCE FORECAST: LINEAR REGRESSION")
+        print("Method: Linear Regression (R² Score)")
         print("="*50)
         
         if self.df_processed_scaled is None:
@@ -1228,6 +1296,16 @@ Format your response in clear, business-friendly language suitable for executive
             print("\nSaved linear_regression_results.png")
         except Exception as e:
             print(f"Warning: Could not create visualization: {e}")
+        
+        # Store performance forecast metrics
+        self.performance_metrics = {
+            'target_feature': target_feature,
+            'train_r2': train_r2,
+            'test_r2': test_r2,
+            'train_mse': train_mse,
+            'test_mse': test_mse,
+            'method': 'Linear Regression (R² Score)'
+        }
         
         results = {
             'model': self.linear_model,
@@ -1404,9 +1482,9 @@ Format your response in clear, business-friendly language suitable for executive
             print("Saved interactive_clusters.html")
     
     def generate_report(self, cluster_analysis: Dict, patterns: Dict, insights: str):
-        """Generate a comprehensive report"""
+        """Generate a comprehensive report with detailed data implications"""
         print("\n" + "="*50)
-        print("GENERATING REPORT")
+        print("GENERATING COMPREHENSIVE REPORT")
         print("="*50)
         
         report = []
@@ -1421,10 +1499,235 @@ Format your response in clear, business-friendly language suitable for executive
         report.append(insights)
         report.append("")
         
-        # Add detailed cluster analysis
+        # ========================================================================
+        # SECTION 1: SEGMENTATION - Silhouette Score / Elbow Method
+        # ========================================================================
         report.append("="*80)
-        report.append("DETAILED CLUSTER ANALYSIS")
+        report.append("1. SEGMENTATION")
+        report.append("Method: Silhouette Score / Elbow Method")
         report.append("="*80)
+        report.append("")
+        
+        if hasattr(self, 'segmentation_metrics') and self.segmentation_metrics:
+            metrics = self.segmentation_metrics
+            report.append(f"Optimal Number of Clusters: {metrics['optimal_k']}")
+            report.append(f"Optimal Silhouette Score: {metrics['optimal_silhouette_score']:.4f}")
+            report.append("")
+            report.append("Silhouette Score Interpretation:")
+            report.append("  - Score ranges from -1 to 1")
+            report.append("  - Values closer to 1 indicate well-separated clusters")
+            report.append(f"  - Score of {metrics['optimal_silhouette_score']:.4f} indicates: ", end="")
+            if metrics['optimal_silhouette_score'] > 0.5:
+                report.append("EXCELLENT cluster separation and cohesion")
+            elif metrics['optimal_silhouette_score'] > 0.3:
+                report.append("GOOD cluster structure with reasonable separation")
+            elif metrics['optimal_silhouette_score'] > 0.1:
+                report.append("FAIR clustering with some overlap between segments")
+            else:
+                report.append("WEAK clustering - segments may not be well-defined")
+            report.append("")
+            report.append("DATA IMPLICATIONS:")
+            report.append("  • The segmentation identifies distinct company groups based on:")
+            report.append("    - Revenue patterns and financial performance")
+            report.append("    - Employee size and organizational structure")
+            report.append("    - Market value and IT investment levels")
+            report.append("  • Well-separated clusters enable:")
+            report.append("    - Targeted marketing strategies for each segment")
+            report.append("    - Customized product/service offerings")
+            report.append("    - Risk assessment tailored to segment characteristics")
+            report.append("  • Business Value:")
+            report.append("    - Sales teams can prioritize high-value segments")
+            report.append("    - Product development can focus on segment-specific needs")
+            report.append("    - Resource allocation optimized by segment potential")
+        else:
+            report.append("Segmentation metrics not available.")
+        report.append("")
+        
+        # ========================================================================
+        # SECTION 2: FINDING TRENDS - Chi-Square Test
+        # ========================================================================
+        report.append("="*80)
+        report.append("2. FINDING TRENDS")
+        report.append("Method: Chi-Square Test")
+        report.append("="*80)
+        report.append("")
+        
+        if hasattr(self, 'trend_metrics') and self.trend_metrics:
+            metrics = self.trend_metrics
+            report.append(f"Variables Tested: {metrics['total_tested']}")
+            report.append(f"Significant Associations: {metrics['significant_count']}")
+            report.append("")
+            
+            if metrics['chi_square_results']:
+                report.append("Trend Analysis Results:")
+                for col, result in metrics['chi_square_results'].items():
+                    significance = "✓ SIGNIFICANT" if result['is_significant'] else "✗ NOT SIGNIFICANT"
+                    report.append(f"\n  {col}:")
+                    report.append(f"    Status: {significance}")
+                    report.append(f"    Chi-square statistic: {result['chi2_statistic']:.4f}")
+                    report.append(f"    P-value: {result['p_value']:.6f}")
+                    if result['is_significant']:
+                        report.append(f"    → This variable shows strong association with cluster membership")
+            report.append("")
+            report.append("DATA IMPLICATIONS:")
+            report.append("  • Significant associations reveal:")
+            report.append("    - Entity Type (HQ vs Branch) patterns across segments")
+            report.append("    - Ownership Type (Public vs Private) distribution by cluster")
+            report.append("    - Structural characteristics that define each segment")
+            report.append("  • Business Applications:")
+            report.append("    - Identify which company types dominate each segment")
+            report.append("    - Understand organizational structure preferences")
+            report.append("    - Predict segment membership from company attributes")
+            report.append("  • Strategic Insights:")
+            report.append("    - Tailor engagement strategies based on entity structure")
+            report.append("    - Adjust sales approach for public vs private companies")
+            report.append("    - Recognize segment-specific organizational patterns")
+        else:
+            report.append("Trend analysis metrics not available.")
+        report.append("")
+        
+        # ========================================================================
+        # SECTION 3: DRIVER IDENTIFICATION - Logistic Regression Coefficients
+        # ========================================================================
+        report.append("="*80)
+        report.append("3. DRIVER IDENTIFICATION")
+        report.append("Method: Logistic Regression (Coefficients)")
+        report.append("="*80)
+        report.append("")
+        
+        if hasattr(self, 'driver_metrics') and self.driver_metrics:
+            metrics = self.driver_metrics
+            report.append(f"Model Training Accuracy: {metrics['train_accuracy']:.2%}")
+            report.append(f"Model Test Accuracy: {metrics['test_accuracy']:.2%}")
+            report.append("")
+            report.append("Key Drivers by Cluster (Top Contributing Features):")
+            report.append("")
+            
+            if metrics['coefficients']:
+                for cluster_id, coefs in sorted(metrics['coefficients'].items()):
+                    report.append(f"  Cluster {cluster_id} Drivers:")
+                    sorted_drivers = sorted(coefs.items(), key=lambda x: abs(x[1]), reverse=True)
+                    for driver, value in sorted_drivers[:5]:
+                        direction = "increases" if value > 0 else "decreases"
+                        report.append(f"    • {driver}: {value:.4f} (strongly {direction} cluster membership)")
+            report.append("")
+            report.append("DATA IMPLICATIONS:")
+            report.append("  • Coefficient analysis reveals:")
+            report.append("    - Which features most strongly predict segment membership")
+            report.append("    - Relative importance of revenue, employees, IT spending, etc.")
+            report.append("    - Key differentiators between company segments")
+            report.append("  • Business Value:")
+            report.append("    - Identify critical factors for segment classification")
+            report.append("    - Understand what makes companies similar within segments")
+            report.append("    - Predict segment membership for new companies")
+            report.append("  • Strategic Applications:")
+            report.append("    - Focus on high-impact features for segmentation")
+            report.append("    - Develop segment-specific value propositions")
+            report.append("    - Create predictive models for lead scoring")
+        else:
+            report.append("Driver identification metrics not available.")
+        report.append("")
+        
+        # ========================================================================
+        # SECTION 4: PERFORMANCE FORECAST - Linear Regression R²
+        # ========================================================================
+        report.append("="*80)
+        report.append("4. PERFORMANCE FORECAST")
+        report.append("Method: Linear Regression (R² Score)")
+        report.append("="*80)
+        report.append("")
+        
+        if hasattr(self, 'performance_metrics') and self.performance_metrics:
+            metrics = self.performance_metrics
+            report.append(f"Target Feature: {metrics['target_feature']}")
+            report.append(f"Training R² Score: {metrics['train_r2']:.4f} ({metrics['train_r2']*100:.2f}%)")
+            report.append(f"Test R² Score: {metrics['test_r2']:.4f} ({metrics['test_r2']*100:.2f}%)")
+            report.append("")
+            report.append("R² Score Interpretation:")
+            report.append("  - R² ranges from 0 to 1 (or can be negative for poor models)")
+            report.append("  - R² = 1.0: Perfect predictions")
+            report.append("  - R² > 0.7: Strong predictive power")
+            report.append("  - R² > 0.5: Moderate predictive power")
+            report.append("  - R² < 0.5: Weak predictive power")
+            report.append("")
+            if metrics['test_r2'] > 0.7:
+                report.append(f"  → R² of {metrics['test_r2']:.4f} indicates STRONG predictive capability")
+            elif metrics['test_r2'] > 0.5:
+                report.append(f"  → R² of {metrics['test_r2']:.4f} indicates MODERATE predictive capability")
+            else:
+                report.append(f"  → R² of {metrics['test_r2']:.4f} indicates LIMITED predictive capability")
+            report.append("")
+            report.append("DATA IMPLICATIONS:")
+            report.append("  • Forecasting Capability:")
+            report.append(f"    - Can predict {metrics['target_feature']} with {metrics['test_r2']*100:.1f}% accuracy")
+            report.append("    - Model performance indicates relationship strength between features and target")
+            report.append("    - Test R² shows model's ability to generalize to new data")
+            report.append("  • Business Applications:")
+            report.append("    - Forecast revenue/performance for new prospects")
+            report.append("    - Estimate market value based on company characteristics")
+            report.append("    - Predict IT spending needs for budgeting")
+            report.append("  • Strategic Value:")
+            report.append("    - Enable data-driven financial planning")
+            report.append("    - Support investment decision-making")
+            report.append("    - Provide benchmarks for company evaluation")
+        else:
+            report.append("Performance forecast metrics not available.")
+        report.append("")
+        
+        # ========================================================================
+        # SECTION 5: SIMPLIFYING COMPLEX DATA - PCA Explained Variance
+        # ========================================================================
+        report.append("="*80)
+        report.append("5. SIMPLIFYING COMPLEX DATA")
+        report.append("Method: PCA Explained Variance")
+        report.append("="*80)
+        report.append("")
+        
+        if hasattr(self, 'pca_metrics') and self.pca_metrics:
+            metrics = self.pca_metrics
+            report.append(f"Reduction Method: {metrics['method']}")
+            report.append(f"Original Dimensions: {metrics['original_dimensions']}")
+            report.append(f"Reduced Dimensions: {metrics['reduced_dimensions']}")
+            report.append(f"Total Variance Explained: {metrics['total_variance_explained']:.2%}")
+            report.append("")
+            report.append("Explained Variance by Component:")
+            for i, var in enumerate(metrics['explained_variance_ratio'][:10], 1):
+                report.append(f"  Component {i}: {var:.2%}")
+            report.append("")
+            report.append("Variance Interpretation:")
+            if metrics['total_variance_explained'] > 0.9:
+                report.append(f"  → {metrics['total_variance_explained']:.1%} variance captured: EXCELLENT data compression")
+            elif metrics['total_variance_explained'] > 0.7:
+                report.append(f"  → {metrics['total_variance_explained']:.1%} variance captured: GOOD data compression")
+            elif metrics['total_variance_explained'] > 0.5:
+                report.append(f"  → {metrics['total_variance_explained']:.1%} variance captured: MODERATE data compression")
+            else:
+                report.append(f"  → {metrics['total_variance_explained']:.1%} variance captured: LIMITED compression")
+            report.append("")
+            report.append("DATA IMPLICATIONS:")
+            report.append("  • Dimensionality Reduction Benefits:")
+            report.append(f"    - Reduced {metrics['original_dimensions']} features to {metrics['reduced_dimensions']} components")
+            report.append(f"    - Maintained {metrics['total_variance_explained']:.1%} of original information")
+            report.append("    - Simplified complex multi-dimensional data for analysis")
+            report.append("  • Business Value:")
+            report.append("    - Faster model training and prediction")
+            report.append("    - Reduced computational complexity")
+            report.append("    - Identified most important underlying patterns")
+            report.append("  • Strategic Insights:")
+            report.append("    - Key dimensions that drive company differences")
+            report.append("    - Simplified visualization of company relationships")
+            report.append("    - Focus on principal components for decision-making")
+        else:
+            report.append("PCA metrics not available.")
+        report.append("")
+        
+        # ========================================================================
+        # SECTION 6: DETAILED CLUSTER ANALYSIS
+        # ========================================================================
+        report.append("="*80)
+        report.append("6. DETAILED CLUSTER ANALYSIS")
+        report.append("="*80)
+        report.append("")
         
         for cluster_id in sorted(cluster_analysis.keys()):
             info = cluster_analysis[cluster_id]
@@ -1439,10 +1742,10 @@ Format your response in clear, business-friendly language suitable for executive
                 for feature, stats in list(info['numeric_stats'].items())[:10]:
                     if 'mean' in stats:
                         report.append(f"  {feature}:")
-                        report.append(f"    Mean: {stats['mean']:.2f}")
-                        report.append(f"    Std: {stats['std']:.2f}")
-                        report.append(f"    Min: {stats['min']:.2f}")
-                        report.append(f"    Max: {stats['max']:.2f}")
+                        report.append(f"    Mean: {stats['mean']:,.2f}")
+                        report.append(f"    Std: {stats['std']:,.2f}")
+                        report.append(f"    Min: {stats['min']:,.2f}")
+                        report.append(f"    Max: {stats['max']:,.2f}")
                 report.append("")
             
             if info['categorical_profiles']:
@@ -1452,6 +1755,64 @@ Format your response in clear, business-friendly language suitable for executive
                     for value, pct in list(profile.items())[:5]:
                         report.append(f"    {value}: {pct:.1%}")
                 report.append("")
+            
+            report.append("BUSINESS IMPLICATIONS FOR THIS SEGMENT:")
+            report.append("  • Segment represents a distinct market group with unique characteristics")
+            report.append("  • Companies in this segment share similar:")
+            if info['numeric_stats']:
+                report.append("    - Financial metrics and performance indicators")
+            if info['categorical_profiles']:
+                report.append("    - Organizational structure and ownership patterns")
+            report.append("  • Recommended Actions:")
+            report.append("    - Develop segment-specific marketing messages")
+            report.append("    - Customize product/service offerings")
+            report.append("    - Adjust pricing strategies to segment characteristics")
+            report.append("")
+        
+        # ========================================================================
+        # SECTION 7: OVERALL DATA IMPLICATIONS & RECOMMENDATIONS
+        # ========================================================================
+        report.append("="*80)
+        report.append("7. OVERALL DATA IMPLICATIONS & STRATEGIC RECOMMENDATIONS")
+        report.append("="*80)
+        report.append("")
+        report.append("KEY FINDINGS:")
+        report.append("  • The analysis successfully identified distinct company segments")
+        report.append("  • Multiple analytical methods confirm segment validity")
+        report.append("  • Predictive models enable forward-looking insights")
+        report.append("")
+        report.append("STRATEGIC RECOMMENDATIONS:")
+        report.append("  1. SEGMENTATION STRATEGY:")
+        report.append("     - Use identified segments for targeted marketing campaigns")
+        report.append("     - Develop segment-specific value propositions")
+        report.append("     - Allocate sales resources based on segment potential")
+        report.append("")
+        report.append("  2. TREND ANALYSIS:")
+        report.append("     - Monitor changes in Entity Type and Ownership patterns")
+        report.append("     - Track segment evolution over time")
+        report.append("     - Identify emerging trends in company structures")
+        report.append("")
+        report.append("  3. DRIVER-BASED DECISIONS:")
+        report.append("     - Focus on high-impact features for segmentation")
+        report.append("     - Develop predictive models for lead qualification")
+        report.append("     - Use driver insights for product development")
+        report.append("")
+        report.append("  4. PERFORMANCE FORECASTING:")
+        report.append("     - Leverage predictive models for revenue estimation")
+        report.append("     - Use forecasts for budget planning and resource allocation")
+        report.append("     - Support investment decisions with data-driven predictions")
+        report.append("")
+        report.append("  5. DATA SIMPLIFICATION:")
+        report.append("     - Utilize reduced dimensions for faster analysis")
+        report.append("     - Focus on principal components for key insights")
+        report.append("     - Streamline reporting with simplified visualizations")
+        report.append("")
+        report.append("BUSINESS VALUE:")
+        report.append("  • Enhanced targeting and personalization capabilities")
+        report.append("  • Improved sales efficiency through segment prioritization")
+        report.append("  • Data-driven decision making across the organization")
+        report.append("  • Competitive advantage through advanced analytics")
+        report.append("")
         
         # Save report
         report_text = "\n".join(report)

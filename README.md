@@ -85,10 +85,14 @@ This system transforms raw company attributes (industry classifications, company
    pip install -r requirements.txt
    ```
 
-4. **Optional: Set up OpenAI API key for LLM insights**
+4. **Optional: Set up API key for LLM insights (OpenAI or DeepSeek)**
    - Create a `.env` file in the project directory
-   - Add: `OPENAI_API_KEY=your_api_key_here`
-   - Or set environment variable: `export OPENAI_API_KEY=your_api_key_here`
+   - For DeepSeek: `DEEPSEEK_API_KEY=your_deepseek_api_key_here`
+   - For OpenAI: `OPENAI_API_KEY=your_openai_api_key_here`
+   - Or set environment variable:
+     - `export DEEPSEEK_API_KEY=your_key_here` (DeepSeek)
+     - `export OPENAI_API_KEY=your_key_here` (OpenAI)
+   - The system will try DeepSeek first, then fall back to OpenAI
 
 ## Usage
 

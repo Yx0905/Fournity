@@ -46,19 +46,22 @@ try:
     HAS_OPENAI = True
 except ImportError:
     HAS_OPENAI = False
-    print("Warning: OpenAI not available. LLM insights will be disabled.")
+    print("Warning: OpenAI package not available. LLM insights will be disabled.")
+    print("Install with: pip install openai")
 
 
 class CompanyIntelligence:
     """Main class for company intelligence analysis"""
     
-    def __init__(self, data_path: str, api_key: Optional[str] = None):
+    def __init__(self, data_path: str, api_key: Optional[str] = None, api_provider: str = 'auto'):
         """
         Initialize the Company Intelligence system
         
         Args:
             data_path: Path to the Excel/CSV file
-            api_key: Optional OpenAI API key for LLM insights
+            api_key: Optional API key for LLM insights (OpenAI or DeepSeek)
+            api_provider: API provider to use ('openai', 'deepseek', or 'auto')
+                         'auto' will try DeepSeek first, then OpenAI
         """
         self.data_path = data_path
         self.df = None
@@ -72,14 +75,49 @@ class CompanyIntelligence:
         self.linear_model = None
         self.tfidf_vectorizer = None
         self.tfidf_features = None
+        self.api_provider = None
         
-        # Initialize OpenAI client if available
+        # Initialize LLM client if available
+        self.client = None
+        self.use_llm = False
+        
         if HAS_OPENAI and api_key:
-            self.client = OpenAI(api_key=api_key)
-            self.use_llm = True
-        else:
-            self.client = None
-            self.use_llm = False
+            if api_provider == 'auto':
+                # Try DeepSeek first (if DEEPSEEK_API_KEY is set), otherwise OpenAI
+                deepseek_key = os.getenv('DEEPSEEK_API_KEY')
+                if deepseek_key:
+                    # Use DeepSeek if environment variable is set
+                    api_key = deepseek_key
+                    api_provider = 'deepseek'
+                elif 'deepseek' in api_key.lower():
+                    # Check if key contains 'deepseek' keyword
+                    api_provider = 'deepseek'
+                elif api_key.startswith('sk-'):
+                    # OpenAI keys typically start with 'sk-'
+                    api_provider = 'openai'
+                else:
+                    # Default to OpenAI if unclear
+                    api_provider = 'openai'
+            
+            if api_provider.lower() == 'deepseek':
+                # DeepSeek uses OpenAI-compatible API with different base URL
+                self.client = OpenAI(
+                    api_key=api_key,
+                    base_url="https://api.deepseek.com/v1"
+                )
+                self.api_provider = 'deepseek'
+                self.use_llm = True
+                print("Using DeepSeek API for LLM insights")
+            elif api_provider.lower() == 'openai':
+                self.client = OpenAI(api_key=api_key)
+                self.api_provider = 'openai'
+                self.use_llm = True
+                print("Using OpenAI API for LLM insights")
+            else:
+                print(f"Warning: Unknown API provider '{api_provider}'. Using OpenAI.")
+                self.client = OpenAI(api_key=api_key)
+                self.api_provider = 'openai'
+                self.use_llm = True
         
         # Load data
         if not self.load_data():
@@ -344,6 +382,11 @@ class CompanyIntelligence:
         numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
         numeric_cols = [col for col in numeric_cols if col != 'Cluster']
         
+        if not numeric_cols:
+            print("Warning: No numeric columns available for comparison.")
+            return pd.DataFrame()
+        
+        comparison = None
         if feature and feature in numeric_cols:
             # Compare specific feature
             comparison = self.df.groupby('Cluster')[feature].agg(['mean', 'std', 'min', 'max', 'count'])
@@ -353,10 +396,13 @@ class CompanyIntelligence:
             # Compare key numeric features
             print("\nKey feature comparison across clusters:")
             key_features = numeric_cols[:10]  # Top 10 numeric features
-            comparison = self.df.groupby('Cluster')[key_features].mean()
-            print(comparison.round(2))
+            if key_features:
+                comparison = self.df.groupby('Cluster')[key_features].mean()
+                print(comparison.round(2))
+            else:
+                comparison = pd.DataFrame()
         
-        return comparison
+        return comparison if comparison is not None else pd.DataFrame()
     
     def identify_patterns(self):
         """Identify notable patterns, strengths, risks, and anomalies"""
@@ -375,20 +421,30 @@ class CompanyIntelligence:
         numeric_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
         numeric_cols = [col for col in numeric_cols if col != 'Cluster']
         
-        for col in numeric_cols[:10]:  # Check top 10 numeric features
-            Q1 = self.df[col].quantile(0.25)
-            Q3 = self.df[col].quantile(0.75)
-            IQR = Q3 - Q1
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
-            
-            outliers = self.df[(self.df[col] < lower_bound) | (self.df[col] > upper_bound)]
-            if len(outliers) > 0:
-                patterns['outliers'].append({
-                    'feature': col,
-                    'count': len(outliers),
-                    'percentage': (len(outliers) / len(self.df)) * 100
-                })
+        if numeric_cols:
+            for col in numeric_cols[:10]:  # Check top 10 numeric features
+                try:
+                    Q1 = self.df[col].quantile(0.25)
+                    Q3 = self.df[col].quantile(0.75)
+                    IQR = Q3 - Q1
+                    
+                    # Skip if IQR is zero or invalid
+                    if IQR <= 0 or pd.isna(IQR):
+                        continue
+                    
+                    lower_bound = Q1 - 1.5 * IQR
+                    upper_bound = Q3 + 1.5 * IQR
+                    
+                    outliers = self.df[(self.df[col] < lower_bound) | (self.df[col] > upper_bound)]
+                    if len(outliers) > 0:
+                        patterns['outliers'].append({
+                            'feature': col,
+                            'count': len(outliers),
+                            'percentage': (len(outliers) / len(self.df)) * 100
+                        })
+                except Exception as e:
+                    # Skip columns that cause errors
+                    continue
         
         # Calculate correlations
         if len(numeric_cols) > 1:
@@ -396,23 +452,35 @@ class CompanyIntelligence:
             patterns['correlations'] = corr_matrix.to_dict()
         
         # Identify cluster differences
-        for cluster_id in sorted(self.df['Cluster'].unique()):
-            cluster_data = self.df[self.df['Cluster'] == cluster_id]
-            other_data = self.df[self.df['Cluster'] != cluster_id]
-            
-            differences = {}
-            for col in numeric_cols[:5]:  # Top 5 features
-                cluster_mean = cluster_data[col].mean()
-                other_mean = other_data[col].mean()
-                # Avoid division by zero
-                if abs(other_mean) > 1e-10 and abs(cluster_mean - other_mean) > 0.1 * abs(other_mean):  # 10% difference
-                    differences[col] = {
-                        'cluster_mean': cluster_mean,
-                        'other_mean': other_mean,
-                        'difference_pct': ((cluster_mean - other_mean) / abs(other_mean)) * 100
-                    }
-            
-            patterns['cluster_differences'][cluster_id] = differences
+        if numeric_cols:
+            for cluster_id in sorted(self.df['Cluster'].unique()):
+                cluster_data = self.df[self.df['Cluster'] == cluster_id]
+                other_data = self.df[self.df['Cluster'] != cluster_id]
+                
+                if len(cluster_data) == 0 or len(other_data) == 0:
+                    continue
+                
+                differences = {}
+                for col in numeric_cols[:5]:  # Top 5 features
+                    try:
+                        cluster_mean = cluster_data[col].mean()
+                        other_mean = other_data[col].mean()
+                        
+                        # Skip if means are NaN
+                        if pd.isna(cluster_mean) or pd.isna(other_mean):
+                            continue
+                        
+                        # Avoid division by zero
+                        if abs(other_mean) > 1e-10 and abs(cluster_mean - other_mean) > 0.1 * abs(other_mean):  # 10% difference
+                            differences[col] = {
+                                'cluster_mean': cluster_mean,
+                                'other_mean': other_mean,
+                                'difference_pct': ((cluster_mean - other_mean) / abs(other_mean)) * 100
+                            }
+                    except Exception:
+                        continue
+                
+                patterns['cluster_differences'][cluster_id] = differences
         
         return patterns
     
@@ -459,8 +527,14 @@ Please provide:
 Format your response in clear, business-friendly language suitable for executives and data buyers."""
 
         try:
+            # Select model based on API provider
+            if self.api_provider == 'deepseek':
+                model = "deepseek-chat"  # DeepSeek's chat model
+            else:
+                model = "gpt-4"  # OpenAI model
+            
             response = self.client.chat.completions.create(
-                model="gpt-4",
+                model=model,
                 messages=[
                     {"role": "system", "content": "You are an expert business intelligence analyst specializing in company data analysis and market segmentation."},
                     {"role": "user", "content": prompt}
@@ -469,10 +543,12 @@ Format your response in clear, business-friendly language suitable for executive
                 max_tokens=1500
             )
             insights = response.choices[0].message.content
-            print("\nLLM insights generated successfully")
+            provider_name = "DeepSeek" if self.api_provider == 'deepseek' else "OpenAI"
+            print(f"\n{provider_name} LLM insights generated successfully")
             return insights
         except Exception as e:
             print(f"Error generating LLM insights: {e}")
+            print("Falling back to rule-based insights...")
             return self.generate_rule_based_insights(cluster_analysis, patterns)
     
     def generate_rule_based_insights(self, cluster_analysis: Dict, patterns: Dict) -> str:
@@ -558,11 +634,16 @@ Format your response in clear, business-friendly language suitable for executive
             text_columns = []
             categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
             for col in categorical_cols:
-                # Check if column might contain text descriptions
-                sample_values = self.df[col].dropna().head(10)
-                avg_length = sample_values.astype(str).str.len().mean()
-                if avg_length > 20:  # Likely text if average length > 20 chars
-                    text_columns.append(col)
+                try:
+                    # Check if column might contain text descriptions
+                    sample_values = self.df[col].dropna().head(10)
+                    if len(sample_values) == 0:
+                        continue
+                    avg_length = sample_values.astype(str).str.len().mean()
+                    if not pd.isna(avg_length) and avg_length > 20:  # Likely text if average length > 20 chars
+                        text_columns.append(col)
+                except Exception:
+                    continue
         
         if not text_columns:
             print("No text columns found for TF-IDF. Skipping TF-IDF feature extraction.")
@@ -1302,18 +1383,35 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # Check for API key in environment or .env file
-    api_key = os.getenv('OPENAI_API_KEY')
+    # Try DeepSeek first, then OpenAI
+    api_key = os.getenv('DEEPSEEK_API_KEY')
+    api_provider = 'deepseek'
+    
+    if not api_key:
+        api_key = os.getenv('OPENAI_API_KEY')
+        api_provider = 'openai'
+    
+    # Load .env file if available
     if not api_key:
         try:
             from dotenv import load_dotenv
             load_dotenv()
-            api_key = os.getenv('OPENAI_API_KEY')
+            api_key = os.getenv('DEEPSEEK_API_KEY') or os.getenv('OPENAI_API_KEY')
+            if os.getenv('DEEPSEEK_API_KEY'):
+                api_provider = 'deepseek'
+            elif os.getenv('OPENAI_API_KEY'):
+                api_provider = 'openai'
         except:
             pass
     
+    # Allow override via command line argument (if provided)
+    if len(sys.argv) > 2:
+        if sys.argv[2].lower() in ['openai', 'deepseek']:
+            api_provider = sys.argv[2].lower()
+    
     # Initialize and run analysis
     try:
-        analyzer = CompanyIntelligence(data_path, api_key=api_key)
+        analyzer = CompanyIntelligence(data_path, api_key=api_key, api_provider=api_provider)
         results = analyzer.run_full_analysis()
         
         if results:

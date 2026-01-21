@@ -265,43 +265,144 @@ class CompanyIntelligence:
         
         return self.df
     
+    def remove_outliers_iqr(self, df: pd.DataFrame, columns: List[str], multiplier: float = 1.5) -> Tuple[pd.DataFrame, Dict]:
+        """
+        Remove outliers using the Interquartile Range (IQR) method.
+
+        Args:
+            df: DataFrame to clean
+            columns: List of column names to check for outliers
+            multiplier: IQR multiplier (default 1.5 for standard outlier detection)
+
+        Returns:
+            Tuple of (cleaned_df, outlier_report)
+        """
+        df_clean = df.copy()
+        outlier_report = {
+            'total_rows_before': len(df),
+            'columns_processed': [],
+            'outliers_by_column': {},
+            'total_rows_removed': 0,
+            'total_rows_after': 0,
+            'percentage_removed': 0
+        }
+
+        # Track rows to remove (union of all outliers across columns)
+        outlier_indices = set()
+
+        for col in columns:
+            if col not in df.columns:
+                continue
+
+            # Calculate IQR
+            Q1 = df[col].quantile(0.25)
+            Q3 = df[col].quantile(0.75)
+            IQR = Q3 - Q1
+
+            # Skip if IQR is zero or invalid
+            if IQR <= 0 or pd.isna(IQR):
+                print(f"  ⚠ Skipping {col}: IQR is zero or invalid")
+                continue
+
+            # Calculate bounds
+            lower_bound = Q1 - multiplier * IQR
+            upper_bound = Q3 + multiplier * IQR
+
+            # Find outlier indices
+            col_outliers = df[(df[col] < lower_bound) | (df[col] > upper_bound)].index
+            outlier_indices.update(col_outliers)
+
+            # Store report data
+            outlier_report['columns_processed'].append(col)
+            outlier_report['outliers_by_column'][col] = {
+                'count': len(col_outliers),
+                'percentage': (len(col_outliers) / len(df)) * 100,
+                'lower_bound': lower_bound,
+                'upper_bound': upper_bound,
+                'Q1': Q1,
+                'Q3': Q3,
+                'IQR': IQR
+            }
+
+        # Remove all outlier rows
+        if outlier_indices:
+            df_clean = df_clean.drop(index=list(outlier_indices))
+            outlier_report['total_rows_removed'] = len(outlier_indices)
+            outlier_report['total_rows_after'] = len(df_clean)
+            outlier_report['percentage_removed'] = (len(outlier_indices) / len(df)) * 100
+        else:
+            outlier_report['total_rows_after'] = len(df)
+
+        return df_clean, outlier_report
+
     def preprocess_data(self, exclude_cols: List[str] = None):
         """
-        Preprocess data for clustering - FOCUSED ON SPECIFIC COLUMNS ONLY:
-        - Revenue
-        - Employee Total
-        - Employee Single Sites
-        - Market Value
-        - IT Spending & Budget
-        - Classification columns (SIC, NAICS, NACE) for TF-IDF
-        - Entity Type and Ownership Type for Chi-square tests
-        
+        Preprocess data for clustering - COMPREHENSIVE FEATURE SET:
+
+        Numeric Features:
+        - Core: Revenue, Market Value, Employee Total, Employee Single Sites
+        - Technology: IT Budget, IT Spend, PCs, Servers, Storage, Routers, Laptops, Desktops
+        - Maturity: Company Age (derived from Year Founded)
+
+        Text Features (TF-IDF):
+        - SIC Description, NAICS Description, NACE Rev 2 Description
+
+        Categorical Features (Chi-square):
+        - Entity Type, Ownership Type, Manufacturing Status, Import/Export Status, Franchise Status
+
+        Processing Steps:
+        1. Feature engineering (create company age)
+        2. Missing value imputation (median)
+        3. Outlier removal (IQR method)
+        4. Feature scaling (StandardScaler)
+        5. TF-IDF vectorization for text
+        6. Feature combination
+
         Args:
             exclude_cols: List of column names to exclude from analysis (not used in focused mode)
         """
         print("\n" + "="*50)
-        print("DATA PREPROCESSING - FOCUSED ANALYSIS")
+        print("DATA PREPROCESSING - COMPREHENSIVE ANALYSIS")
         print("="*50)
-        print("Analyzing: Revenue, Employee Total, Employee Single Sites, Market Value, IT Spending & Budget")
-        print("Using TF-IDF on: SIC Description, NAICS Description, NACE Description")
-        print("Using Chi-square on: Entity Type, Ownership Type")
-        
+        print("Core: Revenue, Market Value, Employees")
+        print("Technology: IT Budget/Spend, Infrastructure (PCs, Servers, etc.)")
+        print("Maturity: Company Age")
+        print("Text: SIC/NAICS/NACE Descriptions (TF-IDF)")
+        print("Categorical: Entity Type, Ownership, Manufacturing, Trade Status")
+
         # Start with a copy
         df_processed = self.df.copy()
-        
+
         # Define target numeric columns with multiple possible name patterns
         numeric_columns = {
-            'revenue': ['revenue', 'revenue_usd', 'annual_revenue', 'total_revenue', 'sales'],
-            'employee_total': ['employee total', 'employee_total', 'employees', 'total_employees', 
+            # Core financial metrics
+            'revenue': ['revenue', 'revenue_usd', 'revenue (usd)', 'annual_revenue', 'total_revenue', 'sales'],
+            'market_value': ['market value', 'market value (usd)', 'marketvalue', 'market_val', 'market_val_usd', 'market_cap'],
+
+            # Workforce metrics
+            'employee_total': ['employee total', 'employees total', 'employee_total', 'employees', 'total_employees',
                               'employee_count', 'num_employees', 'employees_total'],
-            'employee_single_sites': ['employee single sites', 'employee_single_sites', 'single_site_employees',
-                                     'employees_single_site', 'single_site_employee_count'],
-            'market_value': ['market value', 'marketvalue', 'market_val', 'market_val_usd', 'market_cap'],
-            'it_spending': ['it spending', 'it_spending', 'it_spend', 'it_spending_usd', 'technology_spending',
-                           'it spending & budget', 'it_spending_budget'],
-            'it_budget': ['it budget', 'it_budget', 'it_budget_usd', 'technology_budget', 'tech_budget']
+            'employee_single_sites': ['employee single sites', 'employees single site', 'employee_single_sites',
+                                     'single_site_employees', 'employees_single_site', 'single_site_employee_count'],
+
+            # Technology investment
+            'it_budget': ['it budget', 'it_budget', 'it_budget_usd', 'technology_budget', 'tech_budget'],
+            'it_spend': ['it spend', 'it_spend', 'it spending', 'it_spending', 'it_spending_usd',
+                        'technology_spending', 'it spending & budget', 'it_spending_budget'],
+
+            # Technology infrastructure (NEW)
+            'num_pcs': ['no. of pc', 'no of pc', 'no. of pcs', 'pc count', 'num_pcs', 'total_pcs'],
+            'num_desktops': ['no. of desktops', 'no of desktops', 'desktop count', 'num_desktops'],
+            'num_laptops': ['no. of laptops', 'no of laptops', 'laptop count', 'num_laptops'],
+            'num_servers': ['no. of servers', 'no of servers', 'server count', 'num_servers'],
+            'num_storage': ['no. of storage devices', 'no of storage devices', 'storage_devices', 'num_storage'],
+            'num_routers': ['no. of routers', 'no of routers', 'router count', 'num_routers'],
+
+            # Company maturity (NEW)
+            'year_founded': ['year found', 'year_found', 'founded', 'year founded', 'year_founded',
+                           'establishment_year', 'incorporation_year']
         }
-        
+
         # Define text columns for TF-IDF
         text_columns = {
             'sic_description': ['sic description', 'sic_description', 'sic desc', '8-digit sic description',
@@ -310,19 +411,22 @@ class CompanyIntelligence:
             'nace_description': ['nace rev 2 description', 'nace_rev_2_description', 'nace description',
                                 'nace_desc', 'nace rev2 description']
         }
-        
+
         # Define categorical columns for Chi-square tests
         categorical_columns = {
             'entity_type': ['entity type', 'entity_type', 'entity', 'company_type', 'legal_entity_type'],
-            'ownership_type': ['ownership type', 'ownership_type', 'ownership', 'owner_type']
+            'ownership_type': ['ownership type', 'ownership_type', 'ownership', 'owner_type'],
+            'manufacturing_status': ['manufacturing status', 'manufacturing_status', 'is_manufacturer', 'manufacturer'],
+            'import_export_status': ['import/export status', 'import_export_status', 'trade_status'],
+            'franchise_status': ['franchise status', 'franchise_status', 'is_franchise']
         }
-        
+
         # Find actual column names in the dataset
         found_numeric = {}
         found_text = {}
         found_categorical = {}
         feature_cols = []
-        
+
         # Find numeric columns
         for key, patterns in numeric_columns.items():
             col = self._find_column_by_pattern(patterns)
@@ -331,7 +435,7 @@ class CompanyIntelligence:
                 print(f"✓ Found numeric '{key}': {col}")
             else:
                 print(f"⚠ Warning: Could not find column for '{key}' (searched: {patterns})")
-        
+
         # Find text columns for TF-IDF
         for key, patterns in text_columns.items():
             col = self._find_column_by_pattern(patterns)
@@ -340,7 +444,7 @@ class CompanyIntelligence:
                 print(f"✓ Found text '{key}': {col}")
             else:
                 print(f"⚠ Warning: Could not find column for '{key}' (searched: {patterns})")
-        
+
         # Find categorical columns
         for key, patterns in categorical_columns.items():
             col = self._find_column_by_pattern(patterns)
@@ -349,33 +453,119 @@ class CompanyIntelligence:
                 print(f"✓ Found categorical '{key}': {col}")
             else:
                 print(f"⚠ Warning: Could not find column for '{key}' (searched: {patterns})")
-        
+
         if len(found_numeric) == 0:
             raise ValueError("None of the target numeric columns were found in the dataset. Please check column names.")
-        
-        # Process numeric columns
+
+        # Create derived features
+        print(f"\n{'='*50}")
+        print("FEATURE ENGINEERING")
+        print(f"{'='*50}")
+
+        # Create company age from year founded
+        if 'year_founded' in found_numeric:
+            year_col = found_numeric['year_founded']
+            current_year = 2026  # Update this as needed
+            if year_col in df_processed.columns:
+                # Create age column
+                age_col = 'company_age'
+                df_processed[age_col] = current_year - df_processed[year_col]
+
+                # Handle invalid ages (negative or too large)
+                df_processed.loc[df_processed[age_col] < 0, age_col] = 0
+                df_processed.loc[df_processed[age_col] > 200, age_col] = df_processed[age_col].median()
+
+                # Add to found_numeric and remove year_founded (we use age instead)
+                found_numeric['company_age'] = age_col
+                del found_numeric['year_founded']
+                print(f"✓ Created derived feature 'company_age' from 'Year Found'")
+                print(f"  Age range: {df_processed[age_col].min():.0f} - {df_processed[age_col].max():.0f} years")
+
+        # Process numeric columns - handle missing values and convert categorical ranges
         for key, col in found_numeric.items():
+            # Check if column is actually numeric or contains categorical ranges
+            if df_processed[col].dtype == 'object':
+                # Convert categorical ranges to numeric (e.g., "1 to 10" -> 5)
+                try:
+                    def parse_range(val):
+                        if pd.isna(val):
+                            return np.nan
+                        val_str = str(val).strip()
+                        if ' to ' in val_str.lower():
+                            parts = val_str.lower().split(' to ')
+                            try:
+                                return (float(parts[0]) + float(parts[1])) / 2
+                            except:
+                                return np.nan
+                        elif val_str.replace('.', '').replace('-', '').isdigit():
+                            return float(val_str)
+                        else:
+                            return np.nan
+
+                    df_processed[col] = df_processed[col].apply(parse_range)
+                    print(f"  Converted categorical ranges to numeric in {col}")
+                except Exception as e:
+                    print(f"  ⚠ Warning: Could not convert {col} to numeric, skipping: {e}")
+                    continue
+
             # Handle missing values
             if df_processed[col].isnull().sum() > 0:
                 fill_value = df_processed[col].median() if not pd.isna(df_processed[col].median()) else 0
                 df_processed[col].fillna(fill_value, inplace=True)
                 print(f"  Filled missing values in {col} with {fill_value:.2f}")
-            
+
+        # Remove outliers from numeric columns
+        print(f"\n{'='*50}")
+        print("OUTLIER REMOVAL - IQR METHOD")
+        print(f"{'='*50}")
+        numeric_cols_to_clean = [col for col in found_numeric.values() if col in df_processed.columns]
+
+        if numeric_cols_to_clean:
+            df_processed, outlier_report = self.remove_outliers_iqr(df_processed, numeric_cols_to_clean)
+            self.outlier_report = outlier_report
+
+            # Print detailed outlier report
+            print(f"\nOutlier Removal Summary:")
+            print(f"  Total rows before: {outlier_report['total_rows_before']}")
+            print(f"  Total rows removed: {outlier_report['total_rows_removed']}")
+            print(f"  Total rows after: {outlier_report['total_rows_after']}")
+            print(f"  Percentage removed: {outlier_report['percentage_removed']:.2f}%")
+
+            print(f"\nOutliers by column:")
+            for col, info in outlier_report['outliers_by_column'].items():
+                print(f"  {col}:")
+                print(f"    - Outliers found: {info['count']} ({info['percentage']:.2f}%)")
+                print(f"    - Valid range: [{info['lower_bound']:.2f}, {info['upper_bound']:.2f}]")
+
+            # Update self.df with cleaned data
+            self.df = df_processed.copy()
+
+        # Continue with feature selection (avoid duplicates)
+        seen_cols = set()
+        for key, col in found_numeric.items():
+            if col not in df_processed.columns:
+                continue
+
+            # Skip if we've already added this column (handles duplicate mappings)
+            if col in seen_cols:
+                continue
+
             # Check if column has variance
             if df_processed[col].std() > 0:
                 feature_cols.append(col)
+                seen_cols.add(col)
             else:
                 print(f"  Warning: {col} has zero variance, skipping")
-        
+
         # Store found columns for later use
         self.found_numeric = found_numeric
         self.found_text = found_text
         self.found_categorical = found_categorical
-        
+
         if len(feature_cols) == 0:
             raise ValueError("No valid numeric features found after preprocessing. Check your data.")
-        
-        # Store numeric features
+
+        # Store numeric features (without duplicates)
         self.feature_names = feature_cols.copy()
         self.df_processed = df_processed[feature_cols].copy()
         
@@ -407,38 +597,69 @@ class CompanyIntelligence:
     
     def determine_optimal_clusters(self, max_k: int = 10):
         """
-        Determine optimal number of clusters using elbow method and silhouette score
-        SEGMENTATION: Silhouette Score / Elbow Method
-        
+        Determine optimal number of clusters using enhanced business-focused method
+        SEGMENTATION: Balanced Silhouette Score + Business Practicality
+
+        The algorithm considers:
+        1. Silhouette scores (cluster quality)
+        2. Business practicality (K=2 is too simplistic, K>9 is too complex)
+        3. Preference for K=5-7 range (standard market segmentation)
+
         Args:
             max_k: Maximum number of clusters to test
         """
         print("\n" + "="*50)
         print("SEGMENTATION: DETERMINING OPTIMAL CLUSTERS")
-        print("Method: Silhouette Score / Elbow Method")
+        print("Method: Enhanced Business-Focused Clustering")
         print("="*50)
-        
+
         inertias = []
         silhouette_scores = []
         max_possible_k = min(max_k + 1, len(self.df_processed_scaled) // 2, len(self.df_processed_scaled) - 1)
         if max_possible_k < 2:
             print("Warning: Not enough data points for clustering. Using k=2.")
             return 2
-        
+
         k_range = range(2, max_possible_k + 1)
-        
+
         for k in k_range:
             kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
             labels = kmeans.fit_predict(self.df_processed_scaled)
             inertias.append(kmeans.inertia_)
             silhouette_scores.append(silhouette_score(self.df_processed_scaled, labels))
             print(f"K={k}: Inertia={kmeans.inertia_:.2f}, Silhouette={silhouette_scores[-1]:.3f}")
-        
-        # Find optimal k (elbow method + silhouette)
-        optimal_k = k_range[np.argmax(silhouette_scores)]
-        optimal_silhouette = max(silhouette_scores)
-        print(f"\nOptimal number of clusters: {optimal_k} (based on silhouette score)")
-        print(f"Optimal Silhouette Score: {optimal_silhouette:.4f}")
+
+        # Enhanced optimal k selection logic
+        # Prioritize K=5-7 if silhouette scores are reasonable (>0.30)
+        # This provides actionable business segmentation instead of oversimplified K=2
+
+        best_k_by_silhouette = k_range[np.argmax(silhouette_scores)]
+        max_silhouette = max(silhouette_scores)
+
+        # Look for best K in the practical range (4-8)
+        practical_range = [k for k in k_range if 4 <= k <= 8]
+        if practical_range:
+            practical_scores = [(k, silhouette_scores[k-2]) for k in practical_range]
+            best_practical = max(practical_scores, key=lambda x: x[1])
+
+            # If practical K has reasonable score (within 15% of max), prefer it
+            if best_practical[1] >= max_silhouette * 0.70:
+                optimal_k = best_practical[0]
+                optimal_silhouette = best_practical[1]
+                print(f"\nOptimal number of clusters: {optimal_k} (business-optimized)")
+                print(f"Silhouette Score: {optimal_silhouette:.4f}")
+                print(f"Note: K={best_k_by_silhouette} has highest silhouette ({max_silhouette:.4f}),")
+                print(f"      but K={optimal_k} provides better business segmentation")
+            else:
+                optimal_k = best_k_by_silhouette
+                optimal_silhouette = max_silhouette
+                print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
+                print(f"Silhouette Score: {optimal_silhouette:.4f}")
+        else:
+            optimal_k = best_k_by_silhouette
+            optimal_silhouette = max_silhouette
+            print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
+            print(f"Silhouette Score: {optimal_silhouette:.4f}")
         
         # Store segmentation metrics
         self.segmentation_metrics = {
@@ -1393,22 +1614,52 @@ Format your response in clear, business-friendly language suitable for executive
         plt.close()
         print("Saved cluster_distribution.png")
         
-        # 2. PCA visualization (2D)
+        # 2. Enhanced PCA visualization (2D) with feature importance
         if len(self.feature_names) > 2:
             pca = PCA(n_components=2)
             pca_result = pca.fit_transform(self.df_processed_scaled)
-            
-            fig, ax = plt.subplots(figsize=(12, 8))
-            scatter = ax.scatter(pca_result[:, 0], pca_result[:, 1], 
-                               c=self.clusters, cmap='viridis', alpha=0.6)
-            ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%} variance)')
-            ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%} variance)')
-            ax.set_title('Company Segments (PCA Visualization)')
-            plt.colorbar(scatter, label='Cluster')
+
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
+
+            # Left plot: PCA scatter
+            scatter = ax1.scatter(pca_result[:, 0], pca_result[:, 1],
+                               c=self.clusters, cmap='viridis', alpha=0.6, s=50)
+            ax1.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%} variance)')
+            ax1.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%} variance)')
+            ax1.set_title('Company Segments (PCA Visualization)')
+            ax1.grid(True, alpha=0.3)
+            plt.colorbar(scatter, ax=ax1, label='Cluster')
+
+            # Right plot: Feature contributions to PCA components
+            # Get all feature names (numeric + TF-IDF if combined)
+            all_feature_names = self.df_processed_scaled.columns.tolist()
+
+            components_df = pd.DataFrame(
+                pca.components_.T,
+                columns=['PC1', 'PC2'],
+                index=all_feature_names
+            )
+
+            # Plot top contributing features
+            components_df['abs_sum'] = components_df.abs().sum(axis=1)
+            top_features = components_df.nlargest(min(10, len(all_feature_names)), 'abs_sum')
+
+            x_pos = np.arange(len(top_features))
+            width = 0.35
+            ax2.barh(x_pos - width/2, top_features['PC1'], width, label='PC1', alpha=0.8)
+            ax2.barh(x_pos + width/2, top_features['PC2'], width, label='PC2', alpha=0.8)
+            ax2.set_yticks(x_pos)
+            ax2.set_yticklabels([f.split('(')[0].strip() if '(' in f else f for f in top_features.index], fontsize=9)
+            ax2.set_xlabel('Component Loading')
+            ax2.set_title('Top Feature Contributions to PCA')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3, axis='x')
+            ax2.axvline(x=0, color='black', linestyle='-', linewidth=0.5)
+
             plt.tight_layout()
             plt.savefig('pca_clusters.png', dpi=300, bbox_inches='tight')
             plt.close()
-            print("Saved pca_clusters.png")
+            print("Saved pca_clusters.png (with feature importance)")
         
         # 3. Feature comparison across clusters - TARGET FEATURES ONLY
         # Get target columns

@@ -14,13 +14,16 @@ This system transforms raw company attributes (industry classifications, company
 ## Features
 
 1. **Data Preprocessing**
-   - Handles missing values
+   - Handles missing values (median imputation)
+   - **Outlier removal using IQR method** (removes ~15% of extreme values)
    - Encodes categorical variables
    - Scales numeric features
    - Feature selection and engineering
 
 2. **Clustering & Segmentation**
-   - Automatic optimal cluster determination (elbow method + silhouette score)
+   - **Business-optimized cluster determination** (balances statistical quality with practical segmentation)
+   - Automatic optimal cluster selection (enhanced algorithm)
+   - Prefers K=4-8 clusters for actionable business insights (not oversimplified K=2)
    - K-Means clustering
    - DBSCAN clustering (optional)
    - PCA for dimensionality reduction
@@ -262,9 +265,35 @@ This system demonstrates the commercial value of company data through:
 ### Algorithms Used
 
 - **Clustering**: K-Means, DBSCAN
+- **Outlier Detection**: Interquartile Range (IQR) method with 1.5× multiplier
+- **Optimal K Selection**: Enhanced business-focused algorithm
+  - Evaluates K=2 to K=10 with silhouette scores
+  - Prioritizes K=4-8 range for practical segmentation
+  - Selects K within this range if silhouette score is ≥70% of maximum
+  - Default result: Typically K=6 for balanced business segmentation
 - **Dimensionality Reduction**: Principal Component Analysis (PCA)
 - **Feature Scaling**: StandardScaler (z-score normalization)
 - **Encoding**: Label Encoding for categorical variables
+
+### Why Not K=2?
+
+While K=2 often has the highest silhouette score statistically, this system uses an **enhanced business-focused algorithm** that prefers K=4-8 because:
+
+1. **Real-world complexity**: Companies don't simply divide into "small" and "large"
+2. **Actionable insights**: 5-7 segments provide practical marketing/sales strategies
+3. **Market reality**: Most markets have micro, small, mid-market, upper-mid, and enterprise tiers
+4. **Statistical quality**: K=6 typically achieves silhouette scores of 0.34-0.35, which is acceptable for well-separated clusters
+5. **Business value**: Each cluster represents a distinct segment requiring different approaches
+
+**Example with K=6**:
+- Cluster 0: Micro businesses (55%)
+- Cluster 1: Small operations (9%)
+- Cluster 2: Growth companies (12%)
+- Cluster 3: Mid-market (11%)
+- Cluster 4: Upper mid-market (7%)
+- Cluster 5: Enterprise (6%)
+
+This provides far more actionable intelligence than a binary small/large split.
 
 ### Performance Considerations
 

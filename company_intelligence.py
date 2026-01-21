@@ -5,7 +5,7 @@ Analyzes company data to generate actionable insights through data-driven segmen
 
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler, RobustScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.linear_model import LogisticRegression, LinearRegression
@@ -67,7 +67,6 @@ class CompanyIntelligence:
         self.df = None
         self.df_processed = None
         self.scaler = StandardScaler()
-        self.robust_scaler = RobustScaler()
         self.label_encoders = {}
         self.clusters = None
         self.cluster_model = None
@@ -84,7 +83,6 @@ class CompanyIntelligence:
         self.driver_metrics = None
         self.performance_metrics = None
         self.pca_metrics = None
-        self.risk_factors = {}
         
         # Initialize LLM client if available
         self.client = None
@@ -267,134 +265,144 @@ class CompanyIntelligence:
         
         return self.df
     
-    def remove_segment1_outliers(self):
+    def remove_outliers_iqr(self, df: pd.DataFrame, columns: List[str], multiplier: float = 1.5) -> Tuple[pd.DataFrame, Dict]:
         """
-        Remove outliers that match Segment 1 characteristics:
-        - Very high revenue (> 2 billion USD)
-        - Zero employees single site
-        - Zero market value
-        - Zero IT budget
-        
-        These are the 2 companies identified as outliers in Segment 1.
+        Remove outliers using the Interquartile Range (IQR) method.
+
+        Args:
+            df: DataFrame to clean
+            columns: List of column names to check for outliers
+            multiplier: IQR multiplier (default 1.5 for standard outlier detection)
+
+        Returns:
+            Tuple of (cleaned_df, outlier_report)
         """
-        print("\n" + "="*50)
-        print("REMOVING SEGMENT 1 OUTLIERS")
-        print("="*50)
-        
-        if self.df is None or len(self.df) == 0:
-            print("⚠ Warning: No data to filter. Skipping outlier removal.")
-            return
-        
-        initial_count = len(self.df)
-        
-        # Find column names using the same pattern matching approach
-        revenue_col = self._find_column_by_pattern(['revenue', 'revenue_usd', 'annual_revenue', 'total_revenue', 'sales'])
-        employee_single_col = self._find_column_by_pattern(['employee single sites', 'employee_single_sites', 
-                                                             'single_site_employees', 'employees_single_site', 
-                                                             'single_site_employee_count'])
-        market_value_col = self._find_column_by_pattern(['market value', 'marketvalue', 'market_val', 
-                                                          'market_val_usd', 'market_cap'])
-        it_budget_col = self._find_column_by_pattern(['it budget', 'it_budget', 'it_budget_usd', 
-                                                       'technology_budget', 'tech_budget'])
-        
-        # Build filter conditions
-        outlier_mask = pd.Series([True] * len(self.df), index=self.df.index)
-        
-        if revenue_col:
-            # Revenue > 2 billion USD
-            outlier_mask = outlier_mask & (self.df[revenue_col] > 2000000000)
-            print(f"✓ Found revenue column: {revenue_col}")
+        df_clean = df.copy()
+        outlier_report = {
+            'total_rows_before': len(df),
+            'columns_processed': [],
+            'outliers_by_column': {},
+            'total_rows_removed': 0,
+            'total_rows_after': 0,
+            'percentage_removed': 0
+        }
+
+        # Track rows to remove (union of all outliers across columns)
+        outlier_indices = set()
+
+        for col in columns:
+            if col not in df.columns:
+                continue
+
+            # Calculate IQR
+            Q1 = df[col].quantile(0.25)
+            Q3 = df[col].quantile(0.75)
+            IQR = Q3 - Q1
+
+            # Skip if IQR is zero or invalid
+            if IQR <= 0 or pd.isna(IQR):
+                print(f"  ⚠ Skipping {col}: IQR is zero or invalid")
+                continue
+
+            # Calculate bounds
+            lower_bound = Q1 - multiplier * IQR
+            upper_bound = Q3 + multiplier * IQR
+
+            # Find outlier indices
+            col_outliers = df[(df[col] < lower_bound) | (df[col] > upper_bound)].index
+            outlier_indices.update(col_outliers)
+
+            # Store report data
+            outlier_report['columns_processed'].append(col)
+            outlier_report['outliers_by_column'][col] = {
+                'count': len(col_outliers),
+                'percentage': (len(col_outliers) / len(df)) * 100,
+                'lower_bound': lower_bound,
+                'upper_bound': upper_bound,
+                'Q1': Q1,
+                'Q3': Q3,
+                'IQR': IQR
+            }
+
+        # Remove all outlier rows
+        if outlier_indices:
+            df_clean = df_clean.drop(index=list(outlier_indices))
+            outlier_report['total_rows_removed'] = len(outlier_indices)
+            outlier_report['total_rows_after'] = len(df_clean)
+            outlier_report['percentage_removed'] = (len(outlier_indices) / len(df)) * 100
         else:
-            print("⚠ Warning: Could not find revenue column. Skipping revenue filter.")
-            return
-        
-        if employee_single_col:
-            # Employees Single Site = 0
-            outlier_mask = outlier_mask & (self.df[employee_single_col].fillna(0) == 0)
-            print(f"✓ Found employees single site column: {employee_single_col}")
-        else:
-            print("⚠ Warning: Could not find employees single site column. Skipping this filter.")
-        
-        if market_value_col:
-            # Market Value = 0
-            outlier_mask = outlier_mask & (self.df[market_value_col].fillna(0) == 0)
-            print(f"✓ Found market value column: {market_value_col}")
-        else:
-            print("⚠ Warning: Could not find market value column. Skipping this filter.")
-        
-        if it_budget_col:
-            # IT Budget = 0
-            outlier_mask = outlier_mask & (self.df[it_budget_col].fillna(0) == 0)
-            print(f"✓ Found IT budget column: {it_budget_col}")
-        else:
-            print("⚠ Warning: Could not find IT budget column. Skipping this filter.")
-        
-        # Count outliers
-        outlier_count = outlier_mask.sum()
-        
-        if outlier_count > 0:
-            print(f"\n✓ Identified {outlier_count} outlier(s) matching Segment 1 characteristics:")
-            
-            # Show details of outliers being removed
-            outliers_df = self.df[outlier_mask].copy()
-            if revenue_col:
-                print(f"  Revenue range: ${outliers_df[revenue_col].min():,.0f} - ${outliers_df[revenue_col].max():,.0f}")
-            if employee_single_col:
-                print(f"  Employees Single Site: {outliers_df[employee_single_col].unique()}")
-            if market_value_col:
-                print(f"  Market Value: {outliers_df[market_value_col].unique()}")
-            if it_budget_col:
-                print(f"  IT Budget: {outliers_df[it_budget_col].unique()}")
-            
-            # Remove outliers
-            self.df = self.df[~outlier_mask].copy()
-            final_count = len(self.df)
-            
-            print(f"\n✓ Removed {outlier_count} outlier(s)")
-            print(f"  Before: {initial_count} companies")
-            print(f"  After: {final_count} companies")
-            print(f"  Removed: {initial_count - final_count} companies ({((initial_count - final_count) / initial_count) * 100:.2f}%)")
-        else:
-            print("\n✓ No outliers matching Segment 1 characteristics found.")
-            print(f"  Total companies: {initial_count}")
-    
+            outlier_report['total_rows_after'] = len(df)
+
+        return df_clean, outlier_report
+
     def preprocess_data(self, exclude_cols: List[str] = None):
         """
-        Preprocess data for clustering - FOCUSED ON SPECIFIC COLUMNS ONLY:
-        - Revenue
-        - Employee Total
-        - Employee Single Sites
-        - Market Value
-        - IT Spending & Budget
-        - Classification columns (SIC, NAICS, NACE) for TF-IDF
-        - Entity Type and Ownership Type for Chi-square tests
-        
+        Preprocess data for clustering - COMPREHENSIVE FEATURE SET:
+
+        Numeric Features:
+        - Core: Revenue, Market Value, Employee Total, Employee Single Sites
+        - Technology: IT Budget, IT Spend, PCs, Servers, Storage, Routers, Laptops, Desktops
+        - Maturity: Company Age (derived from Year Founded)
+
+        Text Features (TF-IDF):
+        - SIC Description, NAICS Description, NACE Rev 2 Description
+
+        Categorical Features (Chi-square):
+        - Entity Type, Ownership Type, Manufacturing Status, Import/Export Status, Franchise Status
+
+        Processing Steps:
+        1. Feature engineering (create company age)
+        2. Missing value imputation (median)
+        3. Outlier removal (IQR method)
+        4. Feature scaling (StandardScaler)
+        5. TF-IDF vectorization for text
+        6. Feature combination
+
         Args:
             exclude_cols: List of column names to exclude from analysis (not used in focused mode)
         """
         print("\n" + "="*50)
-        print("DATA PREPROCESSING - FOCUSED ANALYSIS")
+        print("DATA PREPROCESSING - COMPREHENSIVE ANALYSIS")
         print("="*50)
-        print("Analyzing: Revenue, Employee Total, Employee Single Sites, Market Value, IT Spending & Budget")
-        print("Using TF-IDF on: SIC Description, NAICS Description, NACE Description")
-        print("Using Chi-square on: Entity Type, Ownership Type")
-        
+        print("Core: Revenue, Market Value, Employees")
+        print("Technology: IT Budget/Spend, Infrastructure (PCs, Servers, etc.)")
+        print("Maturity: Company Age")
+        print("Text: SIC/NAICS/NACE Descriptions (TF-IDF)")
+        print("Categorical: Entity Type, Ownership, Manufacturing, Trade Status")
+
         # Start with a copy
         df_processed = self.df.copy()
-        
+
         # Define target numeric columns with multiple possible name patterns
         numeric_columns = {
-            'revenue': ['revenue', 'revenue_usd', 'annual_revenue', 'total_revenue', 'sales'],
-            'employee_total': ['employee total', 'employee_total', 'employees', 'total_employees', 
+            # Core financial metrics
+            'revenue': ['revenue', 'revenue_usd', 'revenue (usd)', 'annual_revenue', 'total_revenue', 'sales'],
+            'market_value': ['market value', 'market value (usd)', 'marketvalue', 'market_val', 'market_val_usd', 'market_cap'],
+
+            # Workforce metrics
+            'employee_total': ['employee total', 'employees total', 'employee_total', 'employees', 'total_employees',
                               'employee_count', 'num_employees', 'employees_total'],
-            'employee_single_sites': ['employee single sites', 'employee_single_sites', 'single_site_employees',
-                                     'employees_single_site', 'single_site_employee_count'],
-            'market_value': ['market value', 'marketvalue', 'market_val', 'market_val_usd', 'market_cap'],
-            'it_spending': ['it spending', 'it_spending', 'it_spend', 'it_spending_usd', 'technology_spending',
-                           'it spending & budget', 'it_spending_budget'],
-            'it_budget': ['it budget', 'it_budget', 'it_budget_usd', 'technology_budget', 'tech_budget']
+            'employee_single_sites': ['employee single sites', 'employees single site', 'employee_single_sites',
+                                     'single_site_employees', 'employees_single_site', 'single_site_employee_count'],
+
+            # Technology investment
+            'it_budget': ['it budget', 'it_budget', 'it_budget_usd', 'technology_budget', 'tech_budget'],
+            'it_spend': ['it spend', 'it_spend', 'it spending', 'it_spending', 'it_spending_usd',
+                        'technology_spending', 'it spending & budget', 'it_spending_budget'],
+
+            # Technology infrastructure (NEW)
+            'num_pcs': ['no. of pc', 'no of pc', 'no. of pcs', 'pc count', 'num_pcs', 'total_pcs'],
+            'num_desktops': ['no. of desktops', 'no of desktops', 'desktop count', 'num_desktops'],
+            'num_laptops': ['no. of laptops', 'no of laptops', 'laptop count', 'num_laptops'],
+            'num_servers': ['no. of servers', 'no of servers', 'server count', 'num_servers'],
+            'num_storage': ['no. of storage devices', 'no of storage devices', 'storage_devices', 'num_storage'],
+            'num_routers': ['no. of routers', 'no of routers', 'router count', 'num_routers'],
+
+            # Company maturity (NEW)
+            'year_founded': ['year found', 'year_found', 'founded', 'year founded', 'year_founded',
+                           'establishment_year', 'incorporation_year']
         }
-        
+
         # Define text columns for TF-IDF
         text_columns = {
             'sic_description': ['sic description', 'sic_description', 'sic desc', '8-digit sic description',
@@ -403,19 +411,22 @@ class CompanyIntelligence:
             'nace_description': ['nace rev 2 description', 'nace_rev_2_description', 'nace description',
                                 'nace_desc', 'nace rev2 description']
         }
-        
+
         # Define categorical columns for Chi-square tests
         categorical_columns = {
             'entity_type': ['entity type', 'entity_type', 'entity', 'company_type', 'legal_entity_type'],
-            'ownership_type': ['ownership type', 'ownership_type', 'ownership', 'owner_type']
+            'ownership_type': ['ownership type', 'ownership_type', 'ownership', 'owner_type'],
+            'manufacturing_status': ['manufacturing status', 'manufacturing_status', 'is_manufacturer', 'manufacturer'],
+            'import_export_status': ['import/export status', 'import_export_status', 'trade_status'],
+            'franchise_status': ['franchise status', 'franchise_status', 'is_franchise']
         }
-        
+
         # Find actual column names in the dataset
         found_numeric = {}
         found_text = {}
         found_categorical = {}
         feature_cols = []
-        
+
         # Find numeric columns
         for key, patterns in numeric_columns.items():
             col = self._find_column_by_pattern(patterns)
@@ -424,7 +435,7 @@ class CompanyIntelligence:
                 print(f"✓ Found numeric '{key}': {col}")
             else:
                 print(f"⚠ Warning: Could not find column for '{key}' (searched: {patterns})")
-        
+
         # Find text columns for TF-IDF
         for key, patterns in text_columns.items():
             col = self._find_column_by_pattern(patterns)
@@ -433,7 +444,7 @@ class CompanyIntelligence:
                 print(f"✓ Found text '{key}': {col}")
             else:
                 print(f"⚠ Warning: Could not find column for '{key}' (searched: {patterns})")
-        
+
         # Find categorical columns
         for key, patterns in categorical_columns.items():
             col = self._find_column_by_pattern(patterns)
@@ -442,208 +453,213 @@ class CompanyIntelligence:
                 print(f"✓ Found categorical '{key}': {col}")
             else:
                 print(f"⚠ Warning: Could not find column for '{key}' (searched: {patterns})")
-        
+
         if len(found_numeric) == 0:
             raise ValueError("None of the target numeric columns were found in the dataset. Please check column names.")
-        
-        # RISK MITIGATION: Check for missing data (> 50% threshold)
-        print("\n" + "="*50)
-        print("RISK MITIGATION: Missing Data Analysis")
-        print("="*50)
-        missing_threshold = 0.50  # 50% threshold
-        columns_to_drop = []
-        
+
+        # Create derived features
+        print(f"\n{'='*50}")
+        print("FEATURE ENGINEERING")
+        print(f"{'='*50}")
+
+        # Create company age from year founded
+        if 'year_founded' in found_numeric:
+            year_col = found_numeric['year_founded']
+            current_year = 2026  # Update this as needed
+            if year_col in df_processed.columns:
+                # Create age column
+                age_col = 'company_age'
+                df_processed[age_col] = current_year - df_processed[year_col]
+
+                # Handle invalid ages (negative or too large)
+                df_processed.loc[df_processed[age_col] < 0, age_col] = 0
+                df_processed.loc[df_processed[age_col] > 200, age_col] = df_processed[age_col].median()
+
+                # Add to found_numeric and remove year_founded (we use age instead)
+                found_numeric['company_age'] = age_col
+                del found_numeric['year_founded']
+                print(f"✓ Created derived feature 'company_age' from 'Year Found'")
+                print(f"  Age range: {df_processed[age_col].min():.0f} - {df_processed[age_col].max():.0f} years")
+
+        # Process numeric columns - handle missing values and convert categorical ranges
         for key, col in found_numeric.items():
-            missing_pct = df_processed[col].isnull().mean()
-            if missing_pct > missing_threshold:
-                print(f"⚠ HIGH RISK: {col} has {missing_pct:.1%} missing data (> 50%) - DROPPING")
-                columns_to_drop.append(key)
-                self.risk_factors['missing_data'] = {
-                    'impact': 'High',
-                    'columns_affected': [col],
-                    'mitigation': f'Dropped columns with > {missing_threshold:.0%} missing data'
-                }
-            elif missing_pct > 0:
-                print(f"  {col}: {missing_pct:.1%} missing - will be handled")
-        
-        # Remove columns with excessive missing data
-        for key in columns_to_drop:
-            if key in found_numeric:
-                del found_numeric[key]
-                print(f"  Removed {key} from analysis due to excessive missing data")
-        
-        # Process numeric columns with outlier mitigation
-        print("\n" + "="*50)
-        print("RISK MITIGATION: Outlier Handling")
-        print("="*50)
-        outlier_columns = []
-        
-        # Apply log10(1+x) transformation to revenue
-        revenue_col = found_numeric.get('revenue')
-        if revenue_col:
-            print(f"\nApplying log10(1+x) transformation to revenue: {revenue_col}")
-            # Store original revenue for reference
-            df_processed[f'{revenue_col}_original'] = df_processed[revenue_col].copy()
-            # Apply log transformation: log10(1 + revenue)
-            df_processed[revenue_col] = np.log10(1 + df_processed[revenue_col].fillna(0))
-            print(f"  ✓ Applied log10(1+x) transformation to revenue")
-        
-        # Filter to only use: revenue (log-transformed), IT budget, and IT spending for clustering
-        clustering_features = []
-        if revenue_col:
-            clustering_features.append(revenue_col)
-        if 'it_budget' in found_numeric:
-            clustering_features.append(found_numeric['it_budget'])
-        if 'it_spending' in found_numeric:
-            clustering_features.append(found_numeric['it_spending'])
-        
-        print(f"\n✓ Clustering will use only: {clustering_features}")
-        if len(clustering_features) < 3:
-            print(f"⚠ Warning: Expected 3 features (revenue, IT budget, IT spending), but only {len(clustering_features)} found.")
-        
-        for key, col in found_numeric.items():
-            # Handle missing values (for columns with < 50% missing)
+            # Check if column is actually numeric or contains categorical ranges
+            if df_processed[col].dtype == 'object':
+                # Convert categorical ranges to numeric (e.g., "1 to 10" -> 5)
+                try:
+                    def parse_range(val):
+                        if pd.isna(val):
+                            return np.nan
+                        val_str = str(val).strip()
+                        if ' to ' in val_str.lower():
+                            parts = val_str.lower().split(' to ')
+                            try:
+                                return (float(parts[0]) + float(parts[1])) / 2
+                            except:
+                                return np.nan
+                        elif val_str.replace('.', '').replace('-', '').isdigit():
+                            return float(val_str)
+                        else:
+                            return np.nan
+
+                    df_processed[col] = df_processed[col].apply(parse_range)
+                    print(f"  Converted categorical ranges to numeric in {col}")
+                except Exception as e:
+                    print(f"  ⚠ Warning: Could not convert {col} to numeric, skipping: {e}")
+                    continue
+
+            # Handle missing values
             if df_processed[col].isnull().sum() > 0:
                 fill_value = df_processed[col].median() if not pd.isna(df_processed[col].median()) else 0
                 df_processed[col].fillna(fill_value, inplace=True)
                 print(f"  Filled missing values in {col} with {fill_value:.2f}")
-            
-            # Only process columns that will be used for clustering
-            if col not in clustering_features:
+
+        # Remove outliers from numeric columns
+        print(f"\n{'='*50}")
+        print("OUTLIER REMOVAL - IQR METHOD")
+        print(f"{'='*50}")
+        numeric_cols_to_clean = [col for col in found_numeric.values() if col in df_processed.columns]
+
+        if numeric_cols_to_clean:
+            df_processed, outlier_report = self.remove_outliers_iqr(df_processed, numeric_cols_to_clean)
+            self.outlier_report = outlier_report
+
+            # Print detailed outlier report
+            print(f"\nOutlier Removal Summary:")
+            print(f"  Total rows before: {outlier_report['total_rows_before']}")
+            print(f"  Total rows removed: {outlier_report['total_rows_removed']}")
+            print(f"  Total rows after: {outlier_report['total_rows_after']}")
+            print(f"  Percentage removed: {outlier_report['percentage_removed']:.2f}%")
+
+            print(f"\nOutliers by column:")
+            for col, info in outlier_report['outliers_by_column'].items():
+                print(f"  {col}:")
+                print(f"    - Outliers found: {info['count']} ({info['percentage']:.2f}%)")
+                print(f"    - Valid range: [{info['lower_bound']:.2f}, {info['upper_bound']:.2f}]")
+
+            # Update self.df with cleaned data
+            self.df = df_processed.copy()
+
+        # Continue with feature selection (avoid duplicates)
+        seen_cols = set()
+        for key, col in found_numeric.items():
+            if col not in df_processed.columns:
                 continue
-            
-            # Check for outliers using IQR method
-            Q1 = df_processed[col].quantile(0.25)
-            Q3 = df_processed[col].quantile(0.75)
-            IQR = Q3 - Q1
-            if IQR > 0:
-                lower_bound = Q1 - 1.5 * IQR
-                upper_bound = Q3 + 1.5 * IQR
-                outliers = ((df_processed[col] < lower_bound) | (df_processed[col] > upper_bound)).sum()
-                outlier_pct = (outliers / len(df_processed)) * 100
-                
-                if outlier_pct > 5:  # More than 5% outliers
-                    outlier_columns.append(col)
-                    print(f"⚠ HIGH RISK: {col} has {outlier_pct:.1f}% outliers - will use RobustScaler")
-            
+
+            # Skip if we've already added this column (handles duplicate mappings)
+            if col in seen_cols:
+                continue
+
             # Check if column has variance
             if df_processed[col].std() > 0:
-                if col in clustering_features:
-                    feature_cols.append(col)
+                feature_cols.append(col)
+                seen_cols.add(col)
             else:
                 print(f"  Warning: {col} has zero variance, skipping")
-        
-        # Store outlier information
-        if outlier_columns:
-            self.risk_factors['outliers'] = {
-                'impact': 'High',
-                'columns_affected': outlier_columns,
-                'mitigation': 'Using RobustScaler for outlier-resistant scaling'
-            }
-        
+
         # Store found columns for later use
         self.found_numeric = found_numeric
         self.found_text = found_text
         self.found_categorical = found_categorical
-        
+
         if len(feature_cols) == 0:
             raise ValueError("No valid numeric features found after preprocessing. Check your data.")
-        
-        # Store numeric features (only clustering features)
+
+        # Store numeric features (without duplicates)
         self.feature_names = feature_cols.copy()
         self.df_processed = df_processed[feature_cols].copy()
         
-        # Scale numeric features - Use RobustScaler for columns with outliers
-        print("\nApplying scaling:")
-        if outlier_columns:
-            # Use RobustScaler for outlier-affected columns
-            robust_cols = [col for col in feature_cols if col in outlier_columns]
-            standard_cols = [col for col in feature_cols if col not in outlier_columns]
-            
-            scaled_data = {}
-            if robust_cols:
-                robust_scaled = self.robust_scaler.fit_transform(self.df_processed[robust_cols])
-                for i, col in enumerate(robust_cols):
-                    scaled_data[col] = robust_scaled[:, i]
-                print(f"  Used RobustScaler for {len(robust_cols)} columns with outliers: {robust_cols}")
-            
-            if standard_cols:
-                standard_scaled = self.scaler.fit_transform(self.df_processed[standard_cols])
-                for i, col in enumerate(standard_cols):
-                    scaled_data[col] = standard_scaled[:, i]
-                print(f"  Used StandardScaler for {len(standard_cols)} columns: {standard_cols}")
-            
-            self.df_processed_scaled = pd.DataFrame(
-                scaled_data,
-                columns=feature_cols,
-                index=self.df_processed.index
-            )
-        else:
-            # Use StandardScaler if no significant outliers
-            self.df_processed_scaled = pd.DataFrame(
-                self.scaler.fit_transform(self.df_processed),
-                columns=self.df_processed.columns,
-                index=self.df_processed.index
-            )
-            print(f"  Used StandardScaler for all {len(feature_cols)} columns")
+        # Scale numeric features
+        self.df_processed_scaled = pd.DataFrame(
+            self.scaler.fit_transform(self.df_processed),
+            columns=self.df_processed.columns,
+            index=self.df_processed.index
+        )
         
-        print(f"\n✓ Processed {len(feature_cols)} numeric features for clustering")
-        print(f"  Clustering Features: {feature_cols}")
-        print(f"  Note: Using only revenue (log10-transformed), IT budget, and IT spending for clustering")
-        if len(feature_cols) < len(clustering_features):
-            print(f"⚠ Warning: {len(clustering_features) - len(feature_cols)} feature(s) were excluded due to zero variance")
+        print(f"\n✓ Processed {len(feature_cols)} numeric features for analysis")
+        print(f"  Numeric Features: {feature_cols}")
         
-        # Skip TF-IDF for revenue-based clustering (only using revenue, IT budget, IT spending)
-        # Apply TF-IDF to text columns if available (commented out for focused clustering)
-        # if found_text:
-        #     print(f"\nApplying TF-IDF to {len(found_text)} text column(s)...")
-        #     self.apply_tfidf(text_columns=list(found_text.values()), max_features=100, ngram_range=(2, 2))
-        #     
-        #     # Combine TF-IDF features with numeric features
-        #     if self.tfidf_features is not None:
-        #         # Align indices
-        #         self.df_processed_scaled = pd.concat([
-        #             self.df_processed_scaled,
-        #             self.tfidf_features.loc[self.df_processed_scaled.index]
-        #         ], axis=1)
-        #         print(f"  Combined with {self.tfidf_features.shape[1]} TF-IDF features")
+        # Apply TF-IDF to text columns if available
+        if found_text:
+            print(f"\nApplying TF-IDF to {len(found_text)} text column(s)...")
+            self.apply_tfidf(text_columns=list(found_text.values()), max_features=100)
+            
+            # Combine TF-IDF features with numeric features
+            if self.tfidf_features is not None:
+                # Align indices
+                self.df_processed_scaled = pd.concat([
+                    self.df_processed_scaled,
+                    self.tfidf_features.loc[self.df_processed_scaled.index]
+                ], axis=1)
+                print(f"  Combined with {self.tfidf_features.shape[1]} TF-IDF features")
         
         return self.df_processed_scaled
     
     def determine_optimal_clusters(self, max_k: int = 10):
         """
-        Determine optimal number of clusters using elbow method and silhouette score
-        SEGMENTATION: Silhouette Score / Elbow Method
-        
+        Determine optimal number of clusters using enhanced business-focused method
+        SEGMENTATION: Balanced Silhouette Score + Business Practicality
+
+        The algorithm considers:
+        1. Silhouette scores (cluster quality)
+        2. Business practicality (K=2 is too simplistic, K>9 is too complex)
+        3. Preference for K=5-7 range (standard market segmentation)
+
         Args:
             max_k: Maximum number of clusters to test
         """
         print("\n" + "="*50)
         print("SEGMENTATION: DETERMINING OPTIMAL CLUSTERS")
-        print("Method: Silhouette Score / Elbow Method")
+        print("Method: Enhanced Business-Focused Clustering")
         print("="*50)
-        
+
         inertias = []
         silhouette_scores = []
         max_possible_k = min(max_k + 1, len(self.df_processed_scaled) // 2, len(self.df_processed_scaled) - 1)
         if max_possible_k < 2:
             print("Warning: Not enough data points for clustering. Using k=2.")
             return 2
-        
+
         k_range = range(2, max_possible_k + 1)
-        
+
         for k in k_range:
             kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
             labels = kmeans.fit_predict(self.df_processed_scaled)
             inertias.append(kmeans.inertia_)
             silhouette_scores.append(silhouette_score(self.df_processed_scaled, labels))
             print(f"K={k}: Inertia={kmeans.inertia_:.2f}, Silhouette={silhouette_scores[-1]:.3f}")
-        
-        # Find optimal k (elbow method + silhouette)
-        optimal_k = k_range[np.argmax(silhouette_scores)]
-        optimal_silhouette = max(silhouette_scores)
-        print(f"\nOptimal number of clusters: {optimal_k} (based on silhouette score)")
-        print(f"Optimal Silhouette Score: {optimal_silhouette:.4f}")
+
+        # Enhanced optimal k selection logic
+        # Prioritize K=5-7 if silhouette scores are reasonable (>0.30)
+        # This provides actionable business segmentation instead of oversimplified K=2
+
+        best_k_by_silhouette = k_range[np.argmax(silhouette_scores)]
+        max_silhouette = max(silhouette_scores)
+
+        # Look for best K in the practical range (4-8)
+        practical_range = [k for k in k_range if 4 <= k <= 8]
+        if practical_range:
+            practical_scores = [(k, silhouette_scores[k-2]) for k in practical_range]
+            best_practical = max(practical_scores, key=lambda x: x[1])
+
+            # If practical K has reasonable score (within 15% of max), prefer it
+            if best_practical[1] >= max_silhouette * 0.70:
+                optimal_k = best_practical[0]
+                optimal_silhouette = best_practical[1]
+                print(f"\nOptimal number of clusters: {optimal_k} (business-optimized)")
+                print(f"Silhouette Score: {optimal_silhouette:.4f}")
+                print(f"Note: K={best_k_by_silhouette} has highest silhouette ({max_silhouette:.4f}),")
+                print(f"      but K={optimal_k} provides better business segmentation")
+            else:
+                optimal_k = best_k_by_silhouette
+                optimal_silhouette = max_silhouette
+                print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
+                print(f"Silhouette Score: {optimal_silhouette:.4f}")
+        else:
+            optimal_k = best_k_by_silhouette
+            optimal_silhouette = max_silhouette
+            print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
+            print(f"Silhouette Score: {optimal_silhouette:.4f}")
         
         # Store segmentation metrics
         self.segmentation_metrics = {
@@ -676,277 +692,13 @@ class CompanyIntelligence:
         
         return optimal_k
     
-    def _stratified_balanced_kmeans(self, n_clusters: int, max_iterations: int = 200, tolerance: float = 0.05):
-        """
-        Stratified Balanced K-Means: Uses stratified sampling for initialization
-        and aggressive balancing for very even distribution
-        
-        Args:
-            n_clusters: Number of clusters
-            max_iterations: Maximum iterations for balancing
-            tolerance: Acceptable deviation from perfect balance (0.05 = 5%)
-        
-        Returns:
-            Cluster labels
-        """
-        n_samples = len(self.df_processed_scaled)
-        target_size = n_samples / n_clusters
-        min_size = max(1, int(target_size * (1 - tolerance)))
-        max_size = int(target_size * (1 + tolerance))
-        
-        print(f"  Target cluster size: ~{target_size:.0f} (range: {min_size}-{max_size})")
-        print(f"  Using stratified initialization with aggressive balancing...")
-        
-        # Stratified initialization: divide data into n_clusters groups first
-        data_array = self.df_processed_scaled.values
-        indices = np.arange(n_samples)
-        
-        # Sort by first principal component for better stratification
-        if data_array.shape[1] > 0:
-            pca_temp = PCA(n_components=1)
-            pca_scores = pca_temp.fit_transform(data_array)
-            sorted_indices = indices[np.argsort(pca_scores.flatten())]
-        else:
-            sorted_indices = indices
-        
-        # Initialize centroids using stratified sampling
-        initial_centroids = []
-        for k in range(n_clusters):
-            start_idx = (k * n_samples) // n_clusters
-            end_idx = ((k + 1) * n_samples) // n_clusters
-            if end_idx > start_idx:
-                cluster_indices = sorted_indices[start_idx:end_idx]
-                initial_centroids.append(data_array[cluster_indices].mean(axis=0))
-            else:
-                initial_centroids.append(data_array[sorted_indices[k % len(sorted_indices)]])
-        
-        centroids = np.array(initial_centroids)
-        
-        # Initial assignment with size constraints
-        clusters = np.zeros(n_samples, dtype=int)
-        cluster_sizes = np.zeros(n_clusters, dtype=int)
-        
-        # Calculate distances from all points to all centroids
-        distances = np.zeros((n_samples, n_clusters))
-        for i in range(n_samples):
-            for j in range(n_clusters):
-                distances[i, j] = np.linalg.norm(data_array[i] - centroids[j])
-        
-        # Greedy assignment with size constraints
-        assigned = np.zeros(n_samples, dtype=bool)
-        remaining = np.arange(n_samples)
-        
-        # Assign points to clusters respecting size constraints
-        while len(remaining) > 0:
-            best_assignments = []
-            for idx in remaining:
-                if not assigned[idx]:
-                    # Find best cluster that's not full
-                    for cluster_id in range(n_clusters):
-                        if cluster_sizes[cluster_id] < max_size:
-                            best_assignments.append((idx, cluster_id, distances[idx, cluster_id]))
-            
-            if not best_assignments:
-                # If all clusters are full, assign to smallest
-                for idx in remaining:
-                    if not assigned[idx]:
-                        smallest_cluster = np.argmin(cluster_sizes)
-                        clusters[idx] = smallest_cluster
-                        cluster_sizes[smallest_cluster] += 1
-                        assigned[idx] = True
-                break
-            
-            # Sort by distance and assign
-            best_assignments.sort(key=lambda x: x[2])
-            for idx, cluster_id, _ in best_assignments:
-                if not assigned[idx] and cluster_sizes[cluster_id] < max_size:
-                    clusters[idx] = cluster_id
-                    cluster_sizes[cluster_id] += 1
-                    assigned[idx] = True
-                    remaining = remaining[remaining != idx]
-                    if len(remaining) == 0:
-                        break
-        
-        # Aggressive balancing iterations
-        for iteration in range(max_iterations):
-            cluster_counts = pd.Series(clusters).value_counts()
-            cluster_counts = cluster_counts.reindex(range(n_clusters), fill_value=0)
-            
-            # Check if balanced
-            if cluster_counts.min() >= min_size and cluster_counts.max() <= max_size:
-                print(f"  ✓ Clusters balanced after {iteration} iterations")
-                break
-            
-            # Update centroids
-            for cluster_id in range(n_clusters):
-                cluster_mask = clusters == cluster_id
-                if cluster_mask.sum() > 0:
-                    centroids[cluster_id] = data_array[cluster_mask].mean(axis=0)
-            
-            # Recalculate all distances
-            for i in range(n_samples):
-                for j in range(n_clusters):
-                    distances[i, j] = np.linalg.norm(data_array[i] - centroids[j])
-            
-            # Find oversized and undersized clusters
-            oversized = cluster_counts[cluster_counts > max_size].index.tolist()
-            undersized = cluster_counts[cluster_counts < min_size].index.tolist()
-            
-            if not oversized or not undersized:
-                # Try to balance even if within tolerance
-                if iteration % 10 == 0:
-                    # Every 10 iterations, try to balance more aggressively
-                    oversized = cluster_counts[cluster_counts > target_size * 1.1].index.tolist()
-                    undersized = cluster_counts[cluster_counts < target_size * 0.9].index.tolist()
-                else:
-                    break
-            
-            # Reassign points
-            reassigned = 0
-            for large_cluster in oversized:
-                large_indices = np.where(clusters == large_cluster)[0]
-                excess = cluster_counts[large_cluster] - max_size
-                
-                if excess <= 0 or len(large_indices) == 0:
-                    continue
-                
-                # Find best reassignments for this oversized cluster
-                reassign_candidates = []
-                for idx in large_indices:
-                    for small_cluster in undersized:
-                        if cluster_counts[small_cluster] < max_size:
-                            reassign_candidates.append((idx, small_cluster, distances[idx, small_cluster]))
-                
-                # Sort by distance
-                reassign_candidates.sort(key=lambda x: x[2])
-                
-                # Reassign excess points
-                for i in range(min(excess, len(reassign_candidates))):
-                    idx, new_cluster, _ = reassign_candidates[i]
-                    if cluster_counts[new_cluster] < max_size:
-                        clusters[idx] = new_cluster
-                        reassigned += 1
-                        cluster_counts[large_cluster] -= 1
-                        cluster_counts[new_cluster] += 1
-                        if cluster_counts[large_cluster] <= max_size:
-                            break
-            
-            if reassigned == 0:
-                break
-        
-        return clusters
-    
-    def _balanced_kmeans(self, n_clusters: int, max_iterations: int = 100, tolerance: float = 0.10):
-        """
-        Standard Balanced K-Means: Uses multiple initializations and iterative balancing
-        
-        Args:
-            n_clusters: Number of clusters
-            max_iterations: Maximum iterations for balancing
-            tolerance: Acceptable deviation from perfect balance (0.10 = 10%)
-        
-        Returns:
-            Cluster labels
-        """
-        n_samples = len(self.df_processed_scaled)
-        target_size = n_samples / n_clusters
-        min_size = max(1, int(target_size * (1 - tolerance)))
-        max_size = int(target_size * (1 + tolerance))
-        
-        print(f"  Target cluster size: ~{target_size:.0f} (range: {min_size}-{max_size})")
-        
-        # Try multiple initializations and pick the most balanced
-        best_clusters = None
-        best_balance = float('inf')
-        
-        for init in range(10):  # Try 10 different initializations
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42+init, n_init=1, init='k-means++')
-            clusters = kmeans.fit_predict(self.df_processed_scaled)
-            cluster_counts = pd.Series(clusters).value_counts()
-            
-            # Calculate balance score (coefficient of variation)
-            if len(cluster_counts) == n_clusters and cluster_counts.mean() > 0:
-                cv = (cluster_counts.std() / cluster_counts.mean()) * 100
-                if cv < best_balance:
-                    best_balance = cv
-                    best_clusters = clusters.copy()
-        
-        clusters = best_clusters if best_clusters is not None else kmeans.fit_predict(self.df_processed_scaled)
-        data_array = self.df_processed_scaled.values
-        centroids = np.array([
-            data_array[clusters == i].mean(axis=0) 
-            for i in range(n_clusters)
-        ])
-        
-        # Balance clusters iteratively
-        for iteration in range(max_iterations):
-            cluster_counts = pd.Series(clusters).value_counts()
-            cluster_counts = cluster_counts.reindex(range(n_clusters), fill_value=0)
-            
-            # Check if balanced
-            if cluster_counts.min() >= min_size and cluster_counts.max() <= max_size:
-                print(f"  ✓ Clusters balanced after {iteration} iterations")
-                break
-            
-            # Update centroids
-            for cluster_id in range(n_clusters):
-                cluster_mask = clusters == cluster_id
-                if cluster_mask.sum() > 0:
-                    centroids[cluster_id] = data_array[cluster_mask].mean(axis=0)
-            
-            # Find clusters that need adjustment
-            oversized = cluster_counts[cluster_counts > max_size].index.tolist()
-            undersized = cluster_counts[cluster_counts < min_size].index.tolist()
-            
-            if not oversized or not undersized:
-                break
-            
-            # Reassign points from oversized to undersized clusters
-            reassigned = 0
-            for large_cluster in oversized:
-                large_indices = np.where(clusters == large_cluster)[0]
-                
-                if len(large_indices) == 0:
-                    continue
-                
-                # Calculate distances to all centroids
-                reassign_candidates = []
-                for idx in large_indices:
-                    point = data_array[idx:idx+1]
-                    for small_cluster in undersized:
-                        if small_cluster < len(centroids) and cluster_counts[small_cluster] < max_size:
-                            dist = np.linalg.norm(point - centroids[small_cluster])
-                            reassign_candidates.append((idx, small_cluster, dist))
-                
-                # Sort by distance (closest first)
-                reassign_candidates.sort(key=lambda x: x[2])
-                
-                # Reassign excess points
-                excess = cluster_counts[large_cluster] - max_size
-                for i in range(min(excess, len(reassign_candidates))):
-                    idx, new_cluster, _ = reassign_candidates[i]
-                    if cluster_counts[new_cluster] < max_size:
-                        clusters[idx] = new_cluster
-                        reassigned += 1
-                        cluster_counts[large_cluster] -= 1
-                        cluster_counts[new_cluster] += 1
-                        if cluster_counts[large_cluster] <= max_size:
-                            break
-            
-            if reassigned == 0:
-                break
-        
-        return clusters
-    
-    def perform_clustering(self, n_clusters: int = None, method: str = 'kmeans', balanced: bool = True, balance_method: str = 'stratified'):
+    def perform_clustering(self, n_clusters: int = None, method: str = 'kmeans'):
         """
         Perform clustering on the processed data
         
         Args:
             n_clusters: Number of clusters (if None, will determine optimal)
             method: Clustering method ('kmeans' or 'dbscan')
-            balanced: If True, use balanced clustering for more even distribution (default: True)
-            balance_method: Method for balancing ('stratified' for best balance, 'standard' for faster)
         """
         print("\n" + "="*50)
         print("PERFORMING CLUSTERING")
@@ -956,23 +708,8 @@ class CompanyIntelligence:
             n_clusters = self.determine_optimal_clusters()
         
         if method == 'kmeans':
-            if balanced:
-                if balance_method == 'stratified':
-                    print(f"\nUsing Stratified Balanced K-Means for optimal even distribution...")
-                    self.clusters = self._stratified_balanced_kmeans(n_clusters, tolerance=0.05)
-                else:
-                    print(f"\nUsing Balanced K-Means for even distribution...")
-                    self.clusters = self._balanced_kmeans(n_clusters, tolerance=0.10)
-                
-                # Store model info (centroids calculated during balancing)
-                self.cluster_model = KMeans(n_clusters=n_clusters, random_state=42, n_init=1)
-                self.cluster_model.cluster_centers_ = np.array([
-                    self.df_processed_scaled[self.clusters == i].mean().values 
-                    for i in range(n_clusters)
-                ])
-            else:
-                self.cluster_model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-                self.clusters = self.cluster_model.fit_predict(self.df_processed_scaled)
+            self.cluster_model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            self.clusters = self.cluster_model.fit_predict(self.df_processed_scaled)
         elif method == 'dbscan':
             self.cluster_model = DBSCAN(eps=0.5, min_samples=5)
             self.clusters = self.cluster_model.fit_predict(self.df_processed_scaled)
@@ -985,25 +722,6 @@ class CompanyIntelligence:
         print(f"Cluster distribution:")
         cluster_counts = pd.Series(self.clusters).value_counts().sort_index()
         print(cluster_counts)
-        
-        # Calculate balance statistics
-        if balanced and method == 'kmeans':
-            sizes = cluster_counts.values
-            mean_size = sizes.mean()
-            std_size = sizes.std()
-            cv = (std_size / mean_size) * 100 if mean_size > 0 else 0  # Coefficient of variation
-            imbalance_ratio = sizes.max() / sizes.min() if sizes.min() > 0 else float('inf')
-            print(f"\nBalance Statistics:")
-            print(f"  Mean cluster size: {mean_size:.1f}")
-            print(f"  Std deviation: {std_size:.1f}")
-            print(f"  Coefficient of variation: {cv:.2f}% (lower is more balanced, target: <10%)")
-            print(f"  Size range: {sizes.min()} - {sizes.max()}")
-            print(f"  Imbalance ratio: {imbalance_ratio:.2f}x (target: <1.2x)")
-            
-            if cv > 10:
-                print(f"  ⚠ Warning: High imbalance (CV={cv:.2f}%). Consider using balance_method='stratified'")
-            elif cv < 5:
-                print(f"  ✓ Excellent balance achieved!")
         
         return self.clusters
     
@@ -1313,19 +1031,16 @@ Format your response in clear, business-friendly language suitable for executive
         
         return "\n".join(insights)
     
-    def apply_tfidf(self, text_columns: List[str] = None, max_features: int = 100, ngram_range: Tuple[int, int] = (2, 2)):
+    def apply_tfidf(self, text_columns: List[str] = None, max_features: int = 100):
         """
         Apply TF-IDF vectorization to text columns (SIC, NAICS, NACE descriptions)
-        RISK MITIGATION: Using N-grams (2,2) to capture phrases like "Software Development"
         
         Args:
             text_columns: List of column names containing text data
             max_features: Maximum number of TF-IDF features to create
-            ngram_range: N-gram range for TF-IDF (default: (2,2) for bigrams to capture phrases)
         """
         print("\n" + "="*50)
         print("TF-IDF FEATURE EXTRACTION")
-        print("RISK MITIGATION: Using N-grams to reduce noise and capture industry phrases")
         print("="*50)
         
         if text_columns is None:
@@ -1347,20 +1062,13 @@ Format your response in clear, business-friendly language suitable for executive
         for col in text_columns[1:]:
             combined_text += ' ' + self.df[col].fillna('').astype(str)
         
-        # Apply TF-IDF with N-grams to capture phrases (e.g., "Software Development")
-        # RISK MITIGATION: Using (2,2) ngrams to reduce noise and capture meaningful industry phrases
+        # Apply TF-IDF
         self.tfidf_vectorizer = TfidfVectorizer(
             max_features=max_features,
             stop_words='english',
             lowercase=True,
-            ngram_range=ngram_range  # Default (2,2) for bigrams to capture phrases
+            ngram_range=(1, 2)
         )
-        
-        # Store TF-IDF risk mitigation info
-        self.risk_factors['tfidf_noise'] = {
-            'impact': 'Medium',
-            'mitigation': f'Using N-grams {ngram_range} to capture phrases like "Software Development" in industry clustering'
-        }
         
         try:
             tfidf_matrix = self.tfidf_vectorizer.fit_transform(combined_text)
@@ -1410,34 +1118,6 @@ Format your response in clear, business-friendly language suitable for executive
             print("No categorical columns found. Skipping chi-square tests.")
             return None
         
-        # RISK MITIGATION: Limit Chi-Square tests to columns with < 50 unique categories
-        print("\nRISK MITIGATION: High Cardinality Check")
-        print("Limiting Chi-Square tests to columns with < 50 unique categories")
-        high_cardinality_threshold = 50
-        filtered_cols = []
-        high_cardinality_cols = []
-        
-        for col in categorical_cols:
-            unique_count = self.df[col].nunique()
-            if unique_count < high_cardinality_threshold:
-                filtered_cols.append(col)
-                print(f"  ✓ {col}: {unique_count} categories - OK for Chi-Square test")
-            else:
-                high_cardinality_cols.append(col)
-                print(f"  ⚠ {col}: {unique_count} categories (>= {high_cardinality_threshold}) - SKIPPING")
-        
-        if high_cardinality_cols:
-            self.risk_factors['high_cardinality'] = {
-                'impact': 'Medium',
-                'columns_affected': high_cardinality_cols,
-                'mitigation': f'Limited Chi-Square tests to columns with < {high_cardinality_threshold} unique categories'
-            }
-        
-        if not filtered_cols:
-            print("No categorical columns passed the cardinality filter. Skipping chi-square tests.")
-            return None
-        
-        categorical_cols = filtered_cols
         chi_square_results = {}
         
         for col in categorical_cols:
@@ -1507,16 +1187,6 @@ Format your response in clear, business-friendly language suitable for executive
         
         if self.df_processed_scaled is None:
             print("Error: Must preprocess data first!")
-            return None
-        
-        # Adjust n_components to not exceed available features
-        max_components = min(self.df_processed_scaled.shape[0], self.df_processed_scaled.shape[1])
-        if n_components > max_components:
-            print(f"⚠ Warning: Requested {n_components} components, but only {max_components} available. Using {max_components} components.")
-            n_components = max_components
-        
-        if n_components < 1:
-            print(f"Error: Cannot reduce to {n_components} components. Need at least 1 feature.")
             return None
         
         reduction_results = {}
@@ -1932,72 +1602,64 @@ Format your response in clear, business-friendly language suitable for executive
         print("CREATING VISUALIZATIONS")
         print("="*50)
         
-        # 1. Cluster distribution with balance statistics
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-        
+        # 1. Cluster distribution
+        fig, ax = plt.subplots(figsize=(10, 6))
         cluster_counts = self.df['Cluster'].value_counts().sort_index()
-        
-        # Bar chart
-        bars = ax1.bar(cluster_counts.index.astype(str), cluster_counts.values, 
-                       color='steelblue', alpha=0.7, edgecolor='black')
-        ax1.set_xlabel('Cluster', fontsize=12)
-        ax1.set_ylabel('Number of Companies', fontsize=12)
-        ax1.set_title('Company Distribution Across Segments', fontsize=14, fontweight='bold')
-        ax1.grid(axis='y', alpha=0.3)
-        
-        # Add value labels on bars
-        for bar in bars:
-            height = bar.get_height()
-            ax1.text(bar.get_x() + bar.get_width()/2., height,
-                    f'{int(height)}',
-                    ha='center', va='bottom', fontsize=10)
-        
-        # Balance statistics
-        sizes = cluster_counts.values
-        mean_size = sizes.mean()
-        std_size = sizes.std()
-        cv = (std_size / mean_size) * 100 if mean_size > 0 else 0
-        imbalance_ratio = sizes.max() / sizes.min() if sizes.min() > 0 else 0
-        
-        # Statistics text
-        stats_text = f"""Balance Statistics:
-        
-Mean Size: {mean_size:.1f}
-Std Deviation: {std_size:.1f}
-Coefficient of Variation: {cv:.2f}%
-Size Range: {sizes.min()} - {sizes.max()}
-Imbalance Ratio: {imbalance_ratio:.2f}x
-
-Target: Even distribution
-(CV < 20% is considered balanced)"""
-        
-        ax2.text(0.1, 0.5, stats_text, transform=ax2.transAxes,
-                fontsize=11, verticalalignment='center',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        ax2.axis('off')
-        ax2.set_title('Cluster Balance Metrics', fontsize=14, fontweight='bold')
-        
+        ax.bar(cluster_counts.index.astype(str), cluster_counts.values)
+        ax.set_xlabel('Cluster')
+        ax.set_ylabel('Number of Companies')
+        ax.set_title('Company Distribution Across Segments')
         plt.tight_layout()
         plt.savefig('cluster_distribution.png', dpi=300, bbox_inches='tight')
         plt.close()
         print("Saved cluster_distribution.png")
         
-        # 2. PCA visualization (2D)
+        # 2. Enhanced PCA visualization (2D) with feature importance
         if len(self.feature_names) > 2:
             pca = PCA(n_components=2)
             pca_result = pca.fit_transform(self.df_processed_scaled)
-            
-            fig, ax = plt.subplots(figsize=(12, 8))
-            scatter = ax.scatter(pca_result[:, 0], pca_result[:, 1], 
-                               c=self.clusters, cmap='viridis', alpha=0.6)
-            ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%} variance)')
-            ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%} variance)')
-            ax.set_title('Company Segments (PCA Visualization)')
-            plt.colorbar(scatter, label='Cluster')
+
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
+
+            # Left plot: PCA scatter
+            scatter = ax1.scatter(pca_result[:, 0], pca_result[:, 1],
+                               c=self.clusters, cmap='viridis', alpha=0.6, s=50)
+            ax1.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%} variance)')
+            ax1.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%} variance)')
+            ax1.set_title('Company Segments (PCA Visualization)')
+            ax1.grid(True, alpha=0.3)
+            plt.colorbar(scatter, ax=ax1, label='Cluster')
+
+            # Right plot: Feature contributions to PCA components
+            # Get all feature names (numeric + TF-IDF if combined)
+            all_feature_names = self.df_processed_scaled.columns.tolist()
+
+            components_df = pd.DataFrame(
+                pca.components_.T,
+                columns=['PC1', 'PC2'],
+                index=all_feature_names
+            )
+
+            # Plot top contributing features
+            components_df['abs_sum'] = components_df.abs().sum(axis=1)
+            top_features = components_df.nlargest(min(10, len(all_feature_names)), 'abs_sum')
+
+            x_pos = np.arange(len(top_features))
+            width = 0.35
+            ax2.barh(x_pos - width/2, top_features['PC1'], width, label='PC1', alpha=0.8)
+            ax2.barh(x_pos + width/2, top_features['PC2'], width, label='PC2', alpha=0.8)
+            ax2.set_yticks(x_pos)
+            ax2.set_yticklabels([f.split('(')[0].strip() if '(' in f else f for f in top_features.index], fontsize=9)
+            ax2.set_xlabel('Component Loading')
+            ax2.set_title('Top Feature Contributions to PCA')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3, axis='x')
+            ax2.axvline(x=0, color='black', linestyle='-', linewidth=0.5)
+
             plt.tight_layout()
             plt.savefig('pca_clusters.png', dpi=300, bbox_inches='tight')
             plt.close()
-            print("Saved pca_clusters.png")
+            print("Saved pca_clusters.png (with feature importance)")
         
         # 3. Feature comparison across clusters - TARGET FEATURES ONLY
         # Get target columns
@@ -2358,71 +2020,10 @@ Target: Even distribution
             report.append("")
         
         # ========================================================================
-        # SECTION 7: RISK FACTORS & MITIGATION STRATEGIES
+        # SECTION 7: OVERALL DATA IMPLICATIONS & RECOMMENDATIONS
         # ========================================================================
         report.append("="*80)
-        report.append("7. RISK FACTORS & MITIGATION STRATEGIES")
-        report.append("="*80)
-        report.append("")
-        
-        if hasattr(self, 'risk_factors') and self.risk_factors:
-            report.append("The following risk factors were identified and mitigated during analysis:")
-            report.append("")
-            
-            # Outliers
-            if 'outliers' in self.risk_factors:
-                risk = self.risk_factors['outliers']
-                report.append("RISK FACTOR: Outliers")
-                report.append(f"  Impact: {risk['impact']}")
-                report.append(f"  Affected Columns: {', '.join(risk['columns_affected'])}")
-                report.append(f"  Mitigation Strategy: {risk['mitigation']}")
-                report.append("  • RobustScaler uses median and IQR, making it resistant to outliers")
-                report.append("  • This ensures revenue/employee counts don't skew clustering results")
-                report.append("")
-            
-            # High Cardinality
-            if 'high_cardinality' in self.risk_factors:
-                risk = self.risk_factors['high_cardinality']
-                report.append("RISK FACTOR: High Cardinality")
-                report.append(f"  Impact: {risk['impact']}")
-                report.append(f"  Affected Columns: {', '.join(risk['columns_affected'])}")
-                report.append(f"  Mitigation Strategy: {risk['mitigation']}")
-                report.append("  • Chi-Square tests are limited to columns with < 50 unique categories")
-                report.append("  • Prevents statistical issues with sparse contingency tables")
-                report.append("")
-            
-            # Missing Data
-            if 'missing_data' in self.risk_factors:
-                risk = self.risk_factors['missing_data']
-                report.append("RISK FACTOR: Missing Data")
-                report.append(f"  Impact: {risk['impact']}")
-                report.append(f"  Affected Columns: {', '.join(risk['columns_affected'])}")
-                report.append(f"  Mitigation Strategy: {risk['mitigation']}")
-                report.append("  • Columns with > 50% missing data are automatically dropped")
-                report.append("  • Remaining missing values are imputed using median values")
-                report.append("  • Ensures data quality for reliable analysis")
-                report.append("")
-            
-            # TF-IDF Noise
-            if 'tfidf_noise' in self.risk_factors:
-                risk = self.risk_factors['tfidf_noise']
-                report.append("RISK FACTOR: TF-IDF Noise")
-                report.append(f"  Impact: {risk['impact']}")
-                report.append(f"  Mitigation Strategy: {risk['mitigation']}")
-                report.append("  • Using N-grams (2,2) captures meaningful industry phrases")
-                report.append("  • Examples: 'Software Development', 'Financial Services', 'Health Care'")
-                report.append("  • Reduces noise from single-word features")
-                report.append("  • Improves industry classification accuracy")
-                report.append("")
-        else:
-            report.append("No significant risk factors identified during analysis.")
-            report.append("")
-        
-        # ========================================================================
-        # SECTION 8: OVERALL DATA IMPLICATIONS & RECOMMENDATIONS
-        # ========================================================================
-        report.append("="*80)
-        report.append("8. OVERALL DATA IMPLICATIONS & STRATEGIC RECOMMENDATIONS")
+        report.append("7. OVERALL DATA IMPLICATIONS & STRATEGIC RECOMMENDATIONS")
         report.append("="*80)
         report.append("")
         report.append("KEY FINDINGS:")
@@ -2476,11 +2077,10 @@ Target: Even distribution
         print("\n" + "="*80)
         print("STARTING FOCUSED COMPANY INTELLIGENCE ANALYSIS")
         print("="*80)
-        print("Clustering: 10 clusters based on Revenue (log10(1+x)), IT Budget, and IT Spending")
-        print("Analyzing: Revenue (log-transformed) | IT Budget | IT Spending")
+        print("Analyzing: Revenue | Employee Total | Employee Single Sites | Market Value | IT Spending & Budget")
         print("TF-IDF on: SIC Description | NAICS Description | NACE Rev 2 Description")
         print("Chi-square on: Entity Type | Ownership Type")
-        print("Methods: K-Means Clustering | Logistic Regression | Dimensional Reduction | Train/Test Split")
+        print("Methods: Logistic Regression | Dimensional Reduction | Train/Test Split")
         print("="*80)
         
         # Check if data is loaded
@@ -2492,39 +2092,31 @@ Target: Even distribution
         # 1. Explore data
         self.explore_data()
         
-        # 2. Remove Segment 1 outliers before analysis
-        self.remove_segment1_outliers()
-        
-        # 3. Preprocess
+        # 2. Preprocess
         self.preprocess_data(exclude_cols=exclude_cols)
         
-        # 4. Cluster (using 10 clusters based on revenue log10(1+x), IT budget, and IT spending)
-        if n_clusters is None:
-            n_clusters = 10  # Default to 10 clusters for revenue-based clustering
-        # Use stratified balanced method for optimal even distribution
-        self.perform_clustering(n_clusters=n_clusters, balanced=True, balance_method='stratified')
+        # 3. Cluster
+        self.perform_clustering(n_clusters=n_clusters)
         
-        # 5. Apply Chi-square tests on categorical variables
+        # 4. Apply Chi-square tests on categorical variables
         chi_square_results = self.perform_chi_square_test()
         
-        # 6. Analyze clusters
+        # 5. Analyze clusters
         cluster_analysis = self.analyze_clusters()
         
-        # 7. Compare clusters
+        # 6. Compare clusters
         comparison = self.compare_clusters()
         
-        # 8. Identify patterns
+        # 7. Identify patterns
         patterns = self.identify_patterns()
         
-        # 9. Apply dimensional reduction for visualization
-        # Use min of 3 and available features
-        max_components = min(3, self.df_processed_scaled.shape[1], self.df_processed_scaled.shape[0])
-        pca_result = self.apply_dimensionality_reduction(method='pca', n_components=max_components)
+        # 8. Apply dimensional reduction for visualization
+        pca_result = self.apply_dimensionality_reduction(method='pca', n_components=3)
         
-        # 10. Train logistic regression (with train/test split and dimensional reduction)
+        # 9. Train logistic regression (with train/test split and dimensional reduction)
         lr_results = self.train_logistic_regression()
         
-        # 11. Train linear regression (optional)
+        # 10. Train linear regression (optional)
         linear_reg_results = None
         try:
             linear_reg_results = self.train_linear_regression()

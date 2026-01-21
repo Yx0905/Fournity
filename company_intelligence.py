@@ -1621,14 +1621,16 @@ Format your response in clear, business-friendly language suitable for executive
 
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
 
-            # Left plot: PCA scatter
+            # Left plot: PCA scatter with discrete colors
+            n_clusters = len(np.unique(self.clusters))
             scatter = ax1.scatter(pca_result[:, 0], pca_result[:, 1],
-                               c=self.clusters, cmap='viridis', alpha=0.6, s=50)
+                               c=self.clusters, cmap='tab10', alpha=0.6, s=50,
+                               vmin=-0.5, vmax=n_clusters-0.5)
             ax1.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%} variance)')
             ax1.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%} variance)')
             ax1.set_title('Company Segments (PCA Visualization)')
             ax1.grid(True, alpha=0.3)
-            plt.colorbar(scatter, ax=ax1, label='Cluster')
+            plt.colorbar(scatter, ax=ax1, label='Cluster', ticks=range(n_clusters))
 
             # Right plot: Feature contributions to PCA components
             # Get all feature names (numeric + TF-IDF if combined)

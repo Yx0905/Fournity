@@ -630,36 +630,71 @@ class CompanyIntelligence:
             print(f"K={k}: Inertia={kmeans.inertia_:.2f}, Silhouette={silhouette_scores[-1]:.3f}")
 
         # Enhanced optimal k selection logic
-        # Prioritize K=5-7 if silhouette scores are reasonable (>0.30)
-        # This provides actionable business segmentation instead of oversimplified K=2
+        # Prefer K=8 for maximum granular segmentation while maintaining quality
+        # This provides detailed business segmentation instead of oversimplified K=2
 
         best_k_by_silhouette = k_range[np.argmax(silhouette_scores)]
         max_silhouette = max(silhouette_scores)
 
-        # Look for best K in the practical range (4-8)
-        practical_range = [k for k in k_range if 4 <= k <= 8]
-        if practical_range:
-            practical_scores = [(k, silhouette_scores[k-2]) for k in practical_range]
-            best_practical = max(practical_scores, key=lambda x: x[1])
+        # Target K=8 specifically if available and has reasonable quality
+        target_k = 8
+        if target_k in k_range:
+            k8_silhouette = silhouette_scores[target_k - 2]
 
-            # If practical K has reasonable score (within 15% of max), prefer it
-            if best_practical[1] >= max_silhouette * 0.70:
-                optimal_k = best_practical[0]
-                optimal_silhouette = best_practical[1]
-                print(f"\nOptimal number of clusters: {optimal_k} (business-optimized)")
+            # If K=8 has reasonable score (within 30% of max), use it
+            if k8_silhouette >= max_silhouette * 0.65:
+                optimal_k = target_k
+                optimal_silhouette = k8_silhouette
+                print(f"\nOptimal number of clusters: {optimal_k} (business-optimized for granular segmentation)")
                 print(f"Silhouette Score: {optimal_silhouette:.4f}")
                 print(f"Note: K={best_k_by_silhouette} has highest silhouette ({max_silhouette:.4f}),")
-                print(f"      but K={optimal_k} provides better business segmentation")
+                print(f"      but K={optimal_k} provides more detailed business segmentation")
+            else:
+                # Fall back to best in practical range (4-8)
+                practical_range = [k for k in k_range if 4 <= k <= 8]
+                if practical_range:
+                    practical_scores = [(k, silhouette_scores[k-2]) for k in practical_range]
+                    best_practical = max(practical_scores, key=lambda x: x[1])
+
+                    if best_practical[1] >= max_silhouette * 0.70:
+                        optimal_k = best_practical[0]
+                        optimal_silhouette = best_practical[1]
+                        print(f"\nOptimal number of clusters: {optimal_k} (business-optimized)")
+                        print(f"Silhouette Score: {optimal_silhouette:.4f}")
+                        print(f"Note: K={best_k_by_silhouette} has highest silhouette ({max_silhouette:.4f}),")
+                        print(f"      but K={optimal_k} provides better business segmentation")
+                    else:
+                        optimal_k = best_k_by_silhouette
+                        optimal_silhouette = max_silhouette
+                        print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
+                        print(f"Silhouette Score: {optimal_silhouette:.4f}")
+                else:
+                    optimal_k = best_k_by_silhouette
+                    optimal_silhouette = max_silhouette
+                    print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
+                    print(f"Silhouette Score: {optimal_silhouette:.4f}")
+        else:
+            # K=8 not in range, fall back to practical range
+            practical_range = [k for k in k_range if 4 <= k <= 8]
+            if practical_range:
+                practical_scores = [(k, silhouette_scores[k-2]) for k in practical_range]
+                best_practical = max(practical_scores, key=lambda x: x[1])
+
+                if best_practical[1] >= max_silhouette * 0.70:
+                    optimal_k = best_practical[0]
+                    optimal_silhouette = best_practical[1]
+                    print(f"\nOptimal number of clusters: {optimal_k} (business-optimized)")
+                    print(f"Silhouette Score: {optimal_silhouette:.4f}")
+                else:
+                    optimal_k = best_k_by_silhouette
+                    optimal_silhouette = max_silhouette
+                    print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
+                    print(f"Silhouette Score: {optimal_silhouette:.4f}")
             else:
                 optimal_k = best_k_by_silhouette
                 optimal_silhouette = max_silhouette
                 print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
                 print(f"Silhouette Score: {optimal_silhouette:.4f}")
-        else:
-            optimal_k = best_k_by_silhouette
-            optimal_silhouette = max_silhouette
-            print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
-            print(f"Silhouette Score: {optimal_silhouette:.4f}")
         
         # Store segmentation metrics
         self.segmentation_metrics = {
@@ -1621,14 +1656,28 @@ Format your response in clear, business-friendly language suitable for executive
 
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
 
-            # Left plot: PCA scatter
+            # Left plot: PCA scatter with distinct colors for discrete clusters
+            # Use tab10 or Set1 for distinct, categorical colors
+            import matplotlib.cm as cm
+            n_clusters = len(np.unique(self.clusters))
+
+            # Use distinct colors instead of continuous colormap
+            if n_clusters <= 10:
+                colors = cm.tab10(np.linspace(0, 1, 10))[:n_clusters]
+            else:
+                colors = cm.tab20(np.linspace(0, 1, 20))[:n_clusters]
+
             scatter = ax1.scatter(pca_result[:, 0], pca_result[:, 1],
-                               c=self.clusters, cmap='viridis', alpha=0.6, s=50)
+                               c=self.clusters, cmap='tab10', alpha=0.6, s=50,
+                               vmin=-0.5, vmax=n_clusters-0.5)
             ax1.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%} variance)')
             ax1.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%} variance)')
             ax1.set_title('Company Segments (PCA Visualization)')
             ax1.grid(True, alpha=0.3)
-            plt.colorbar(scatter, ax=ax1, label='Cluster')
+
+            # Create discrete colorbar
+            cbar = plt.colorbar(scatter, ax=ax1, label='Cluster', ticks=range(n_clusters))
+            cbar.set_label('Cluster', rotation=270, labelpad=15)
 
             # Right plot: Feature contributions to PCA components
             # Get all feature names (numeric + TF-IDF if combined)

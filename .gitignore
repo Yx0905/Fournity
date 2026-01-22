@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Data files (uncomment if you don't want to track data)
+# *.xlsx
+# *.xls
+# *.csv
+
+# Output files
+*.png
+*.html
+*.txt
+companies_with_segments.csv
+company_intelligence_report.txt
+optimal_clusters.png
+cluster_distribution.png
+pca_clusters.png
+feature_comparison.png
+interactive_clusters.html
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

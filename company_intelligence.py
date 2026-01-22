@@ -167,6 +167,10 @@ class CompanyIntelligence:
             
             print(f"Data loaded successfully: {self.df.shape[0]} companies, {self.df.shape[1]} features")
             print(f"\nColumns: {list(self.df.columns)}")
+            
+            # Automatically filter out inactive companies
+            self.filter_inactive_companies()
+            
             return True
         except FileNotFoundError:
             print(f"\n❌ ERROR: File not found: {self.data_path}")
@@ -183,6 +187,281 @@ class CompanyIntelligence:
             print(f"   - For Excel files, make sure openpyxl is installed: pip install openpyxl")
             print(f"   - Try using an absolute path to the file")
             return False
+    
+    def _get_original_value(self, col_name: str, found_numeric: Dict, key: str):
+        """
+        Helper method to get original value (before log transformation)
+        
+        Args:
+            col_name: Column name
+            found_numeric: Dictionary of found numeric columns
+            key: Key in found_numeric dictionary
+            
+        Returns:
+            Series with original values
+        """
+        original_col = f'{col_name}_original'
+        
+        if original_col in self.df.columns:
+            return self.df[original_col]
+        else:
+            # Reverse log transformation: log10(1+x) -> x = 10^y - 1
+            if col_name in self.df.columns:
+                return np.power(10, self.df[col_name]) - 1
+            else:
+                return pd.Series([0] * len(self.df), index=self.df.index)
+    
+    def _calculate_revenue_to_employee_ratio(self, found_numeric: Dict):
+        """
+        Calculate Revenue to Employees ratio using original values (before log transformation)
+        
+        Args:
+            found_numeric: Dictionary of found numeric columns
+        """
+        revenue_col = found_numeric.get('revenue')
+        employee_col = found_numeric.get('employee_total')
+        
+        if revenue_col and employee_col:
+            # Get original values
+            revenue_original = self._get_original_value(revenue_col, found_numeric, 'revenue')
+            employee_original = self._get_original_value(employee_col, found_numeric, 'employee_total')
+            
+            # Calculate ratio: Revenue per Employee
+            # Handle division by zero and negative values
+            ratio = revenue_original / (employee_original + 1)  # +1 to avoid division by zero
+            
+            # Replace inf and NaN with 0
+            ratio = ratio.replace([np.inf, -np.inf], 0)
+            ratio = ratio.fillna(0)
+            
+            self.df['Revenue_to_Employee_Ratio'] = ratio
+            
+            # Calculate statistics
+            valid_ratio = ratio[ratio > 0]
+            if len(valid_ratio) > 0:
+                print(f"\n✓ Calculated Revenue to Employee Ratio")
+                print(f"  Mean: ${valid_ratio.mean():,.2f} per employee")
+                print(f"  Median: ${valid_ratio.median():,.2f} per employee")
+                print(f"  Min: ${valid_ratio.min():,.2f} per employee")
+                print(f"  Max: ${valid_ratio.max():,.2f} per employee")
+            else:
+                print(f"\n⚠ Warning: Could not calculate meaningful Revenue to Employee Ratio")
+        else:
+            if not revenue_col:
+                print(f"\n⚠ Warning: Revenue column not found. Cannot calculate Revenue to Employee Ratio.")
+            if not employee_col:
+                print(f"\n⚠ Warning: Employee Total column not found. Cannot calculate Revenue to Employee Ratio.")
+    
+    def _calculate_business_metrics(self, found_numeric: Dict):
+        """
+        Calculate additional business metrics using original values (before log transformation)
+        
+        Metrics calculated:
+        1. IT Intensity = IT Spending / Revenue
+        2. IT Budget Utilization = IT Budget / IT Spending
+        3. PS (Price-to-Sales) = Market Value / Revenue
+        4. Market Cap per Employee = Market Value / Employees
+        5. Market Value / IT Spending
+        6. Underlying Value = Revenue per Employee * IT Intensity * No of Employees
+        
+        Args:
+            found_numeric: Dictionary of found numeric columns
+        """
+        print("\n" + "="*50)
+        print("CALCULATING BUSINESS METRICS")
+        print("="*50)
+        
+        # Get original values
+        revenue_col = found_numeric.get('revenue')
+        employee_col = found_numeric.get('employee_total')
+        it_spending_col = found_numeric.get('it_spending')
+        it_budget_col = found_numeric.get('it_budget')
+        market_value_col = found_numeric.get('market_value')
+        
+        metrics_calculated = []
+        
+        # 1. IT Intensity = IT Spending / Revenue
+        if it_spending_col and revenue_col:
+            it_spending_orig = self._get_original_value(it_spending_col, found_numeric, 'it_spending')
+            revenue_orig = self._get_original_value(revenue_col, found_numeric, 'revenue')
+            
+            # Avoid division by zero
+            it_intensity = it_spending_orig / (revenue_orig + 1)
+            it_intensity = it_intensity.replace([np.inf, -np.inf], 0).fillna(0)
+            self.df['IT_Intensity'] = it_intensity
+            metrics_calculated.append('IT_Intensity')
+            
+            valid_intensity = it_intensity[it_intensity > 0]
+            if len(valid_intensity) > 0:
+                print(f"\n✓ IT Intensity (IT Spending / Revenue)")
+                print(f"  Mean: {valid_intensity.mean():.4f}")
+                print(f"  Median: {valid_intensity.median():.4f}")
+        
+        # 2. IT Budget Utilization = IT Budget / IT Spending
+        if it_budget_col and it_spending_col:
+            it_budget_orig = self._get_original_value(it_budget_col, found_numeric, 'it_budget')
+            it_spending_orig = self._get_original_value(it_spending_col, found_numeric, 'it_spending')
+            
+            it_utilization = it_budget_orig / (it_spending_orig + 1)
+            it_utilization = it_utilization.replace([np.inf, -np.inf], 0).fillna(0)
+            self.df['IT_Budget_Utilization'] = it_utilization
+            metrics_calculated.append('IT_Budget_Utilization')
+            
+            valid_util = it_utilization[it_utilization > 0]
+            if len(valid_util) > 0:
+                print(f"\n✓ IT Budget Utilization (IT Budget / IT Spending)")
+                print(f"  Mean: {valid_util.mean():.4f}")
+                print(f"  Median: {valid_util.median():.4f}")
+        
+        # 3. PS (Price-to-Sales) = Market Value / Revenue
+        if market_value_col and revenue_col:
+            market_value_orig = self._get_original_value(market_value_col, found_numeric, 'market_value')
+            revenue_orig = self._get_original_value(revenue_col, found_numeric, 'revenue')
+            
+            ps_ratio = market_value_orig / (revenue_orig + 1)
+            ps_ratio = ps_ratio.replace([np.inf, -np.inf], 0).fillna(0)
+            self.df['PS_Ratio'] = ps_ratio
+            metrics_calculated.append('PS_Ratio')
+            
+            valid_ps = ps_ratio[ps_ratio > 0]
+            if len(valid_ps) > 0:
+                print(f"\n✓ PS Ratio (Market Value / Revenue)")
+                print(f"  Mean: {valid_ps.mean():.4f}")
+                print(f"  Median: {valid_ps.median():.4f}")
+        
+        # 4. Market Cap per Employee = Market Value / Employees
+        if market_value_col and employee_col:
+            market_value_orig = self._get_original_value(market_value_col, found_numeric, 'market_value')
+            employee_orig = self._get_original_value(employee_col, found_numeric, 'employee_total')
+            
+            market_cap_per_emp = market_value_orig / (employee_orig + 1)
+            market_cap_per_emp = market_cap_per_emp.replace([np.inf, -np.inf], 0).fillna(0)
+            self.df['Market_Cap_per_Employee'] = market_cap_per_emp
+            metrics_calculated.append('Market_Cap_per_Employee')
+            
+            valid_mc = market_cap_per_emp[market_cap_per_emp > 0]
+            if len(valid_mc) > 0:
+                print(f"\n✓ Market Cap per Employee")
+                print(f"  Mean: ${valid_mc.mean():,.2f} per employee")
+                print(f"  Median: ${valid_mc.median():,.2f} per employee")
+        
+        # 5. Market Value / IT Spending
+        if market_value_col and it_spending_col:
+            market_value_orig = self._get_original_value(market_value_col, found_numeric, 'market_value')
+            it_spending_orig = self._get_original_value(it_spending_col, found_numeric, 'it_spending')
+            
+            market_to_it = market_value_orig / (it_spending_orig + 1)
+            market_to_it = market_to_it.replace([np.inf, -np.inf], 0).fillna(0)
+            self.df['Market_Value_to_IT_Spending'] = market_to_it
+            metrics_calculated.append('Market_Value_to_IT_Spending')
+            
+            valid_mv_it = market_to_it[market_to_it > 0]
+            if len(valid_mv_it) > 0:
+                print(f"\n✓ Market Value / IT Spending")
+                print(f"  Mean: {valid_mv_it.mean():.4f}")
+                print(f"  Median: {valid_mv_it.median():.4f}")
+        
+        # 6. Underlying Value = Revenue per Employee * IT Intensity * No of Employees
+        if revenue_col and employee_col and it_spending_col:
+            revenue_orig = self._get_original_value(revenue_col, found_numeric, 'revenue')
+            employee_orig = self._get_original_value(employee_col, found_numeric, 'employee_total')
+            
+            # Revenue per Employee
+            revenue_per_emp = revenue_orig / (employee_orig + 1)
+            revenue_per_emp = revenue_per_emp.replace([np.inf, -np.inf], 0).fillna(0)
+            
+            # IT Intensity (already calculated above)
+            if 'IT_Intensity' in self.df.columns:
+                it_intensity = self.df['IT_Intensity']
+            else:
+                # Calculate if not already done
+                if it_spending_col:
+                    it_spending_orig = self._get_original_value(it_spending_col, found_numeric, 'it_spending')
+                    it_intensity = it_spending_orig / (revenue_orig + 1)
+                    it_intensity = it_intensity.replace([np.inf, -np.inf], 0).fillna(0)
+                else:
+                    it_intensity = pd.Series([0] * len(self.df), index=self.df.index)
+            
+            # Underlying Value = Revenue per Employee * IT Intensity * No of Employees
+            underlying_value = revenue_per_emp * it_intensity * employee_orig
+            underlying_value = underlying_value.replace([np.inf, -np.inf], 0).fillna(0)
+            self.df['Underlying_Value'] = underlying_value
+            metrics_calculated.append('Underlying_Value')
+            
+            valid_uv = underlying_value[underlying_value > 0]
+            if len(valid_uv) > 0:
+                print(f"\n✓ Underlying Value (Revenue/Employee * IT Intensity * Employees)")
+                print(f"  Mean: {valid_uv.mean():,.2f}")
+                print(f"  Median: {valid_uv.median():,.2f}")
+        
+        print(f"\n✓ Calculated {len(metrics_calculated)} business metrics: {', '.join(metrics_calculated)}")
+    
+    def filter_inactive_companies(self):
+        """
+        Filter out inactive companies from the dataset
+        
+        Removes companies where Company Status is 'Inactive' or similar inactive statuses
+        """
+        if self.df is None or len(self.df) == 0:
+            print("Warning: No data available to filter")
+            return
+        
+        initial_count = len(self.df)
+        
+        # Find the status column
+        status_patterns = [
+            'company status',
+            'status',
+            'active/inactive',
+            'company_status'
+        ]
+        
+        status_col = self._find_column_by_pattern(status_patterns)
+        
+        if status_col is None:
+            print("⚠ Warning: Could not find company status column. Skipping inactive company filtering.")
+            print("   Searched for columns matching: company status, status, active/inactive")
+            return
+        
+        print(f"\n{'='*50}")
+        print("DATA CLEANING: Filtering Inactive Companies")
+        print(f"{'='*50}")
+        print(f"Found status column: {status_col}")
+        
+        # Check current status distribution
+        if status_col in self.df.columns:
+            status_counts = self.df[status_col].value_counts()
+            print(f"\nCurrent status distribution:")
+            for status, count in status_counts.items():
+                print(f"  {status}: {count} companies ({count/initial_count*100:.1f}%)")
+            
+            # Filter to keep only active companies
+            # Handle case-insensitive matching and various formats
+            active_mask = self.df[status_col].astype(str).str.strip().str.lower().isin([
+                'active', 'act', 'a', '1', 'true', 'yes', 'y'
+            ])
+            
+            # Also check for NaN/empty values - we'll keep those as they might be active
+            # (assuming missing status means active by default)
+            active_mask = active_mask | self.df[status_col].isna()
+            
+            inactive_count = (~active_mask).sum()
+            self.df = self.df[active_mask].copy()
+            
+            final_count = len(self.df)
+            removed_count = initial_count - final_count
+            
+            print(f"\n✓ Data cleaning complete:")
+            print(f"  Initial companies: {initial_count}")
+            print(f"  Removed inactive: {removed_count}")
+            print(f"  Remaining active companies: {final_count} ({final_count/initial_count*100:.1f}%)")
+            
+            if removed_count > 0:
+                print(f"\n  ✓ Successfully filtered out {removed_count} inactive companies")
+            else:
+                print(f"\n  ℹ No inactive companies found (all companies are active)")
+        else:
+            print(f"⚠ Warning: Status column '{status_col}' not found in dataframe")
     
     def explore_data(self):
         """Perform initial data exploration - focused on target columns"""
@@ -474,22 +753,37 @@ class CompanyIntelligence:
         
         # Process numeric columns with outlier mitigation
         print("\n" + "="*50)
-        print("RISK MITIGATION: Outlier Handling")
+        print("APPLYING LOG10 TRANSFORMATION TO ALL NUMERIC DATA")
         print("="*50)
         outlier_columns = []
         
-        # Apply log10(1+x) transformation to revenue
-        revenue_col = found_numeric.get('revenue')
-        if revenue_col:
-            print(f"\nApplying log10(1+x) transformation to revenue: {revenue_col}")
-            # Store original revenue for reference
-            df_processed[f'{revenue_col}_original'] = df_processed[revenue_col].copy()
-            # Apply log transformation: log10(1 + revenue)
-            df_processed[revenue_col] = np.log10(1 + df_processed[revenue_col].fillna(0))
-            print(f"  ✓ Applied log10(1+x) transformation to revenue")
+        # Apply log10 transformation to ALL numeric columns
+        print("\nApplying log10 transformation to all numeric columns...")
+        for key, col in found_numeric.items():
+            # Store original values for reference (before any transformation)
+            if col in df_processed.columns:
+                df_processed[f'{col}_original'] = df_processed[col].copy()
+                # Also store in main dataframe for later use
+                self.df[f'{col}_original'] = df_processed[col].copy()
+            
+            # Handle missing values first (fill with 0 for log transformation)
+            original_missing = df_processed[col].isnull().sum()
+            if original_missing > 0:
+                df_processed[col].fillna(0, inplace=True)
+            
+            # Apply log10 transformation: log10(1 + abs(x)) to handle negatives
+            # For non-negative values: log10(1 + x)
+            # For negative values: log10(1 + abs(x)) (preserves magnitude)
+            df_processed[col] = np.log10(1 + df_processed[col].abs())
+            
+            if original_missing > 0:
+                print(f"  ✓ Applied log10(1+abs(x)) to {col} (filled {original_missing} missing values with 0)")
+            else:
+                print(f"  ✓ Applied log10(1+abs(x)) to {col}")
         
         # Filter to only use: revenue (log-transformed), IT budget, and IT spending for clustering
         clustering_features = []
+        revenue_col = found_numeric.get('revenue')
         if revenue_col:
             clustering_features.append(revenue_col)
         if 'it_budget' in found_numeric:
@@ -502,12 +796,6 @@ class CompanyIntelligence:
             print(f"⚠ Warning: Expected 3 features (revenue, IT budget, IT spending), but only {len(clustering_features)} found.")
         
         for key, col in found_numeric.items():
-            # Handle missing values (for columns with < 50% missing)
-            if df_processed[col].isnull().sum() > 0:
-                fill_value = df_processed[col].median() if not pd.isna(df_processed[col].median()) else 0
-                df_processed[col].fillna(fill_value, inplace=True)
-                print(f"  Filled missing values in {col} with {fill_value:.2f}")
-            
             # Only process columns that will be used for clustering
             if col not in clustering_features:
                 continue
@@ -549,6 +837,20 @@ class CompanyIntelligence:
         if len(feature_cols) == 0:
             raise ValueError("No valid numeric features found after preprocessing. Check your data.")
         
+        # Update self.df with log-transformed values for all numeric columns
+        # This ensures analysis methods use the transformed data
+        print("\nUpdating main dataframe with log10-transformed values...")
+        for key, col in found_numeric.items():
+            if col in df_processed.columns:
+                self.df[col] = df_processed[col].values
+                print(f"  ✓ Updated {col} in main dataframe with log10-transformed values")
+        
+        # Calculate Revenue to Employees ratio (using original values)
+        self._calculate_revenue_to_employee_ratio(found_numeric)
+        
+        # Calculate additional business metrics (using original values)
+        self._calculate_business_metrics(found_numeric)
+        
         # Store numeric features (only clustering features)
         self.feature_names = feature_cols.copy()
         self.df_processed = df_processed[feature_cols].copy()
@@ -589,7 +891,7 @@ class CompanyIntelligence:
         
         print(f"\n✓ Processed {len(feature_cols)} numeric features for clustering")
         print(f"  Clustering Features: {feature_cols}")
-        print(f"  Note: Using only revenue (log10-transformed), IT budget, and IT spending for clustering")
+        print(f"  Note: All numeric data has been log10-transformed. Using revenue, IT budget, and IT spending for clustering")
         if len(feature_cols) < len(clustering_features):
             print(f"⚠ Warning: {len(clustering_features) - len(feature_cols)} feature(s) were excluded due to zero variance")
         
@@ -2069,6 +2371,184 @@ Target: Even distribution
             
             fig.write_html('interactive_clusters.html')
             print("Saved interactive_clusters.html")
+        
+        # 5. Revenue to Employee Ratio Distribution
+        if 'Revenue_to_Employee_Ratio' in self.df.columns:
+            ratio_data = self.df['Revenue_to_Employee_Ratio']
+            valid_ratio = ratio_data[ratio_data > 0]  # Exclude zeros and negatives
+            
+            if len(valid_ratio) > 0:
+                fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+                
+                # 5a. Histogram
+                axes[0, 0].hist(valid_ratio, bins=50, edgecolor='black', alpha=0.7, color='steelblue')
+                axes[0, 0].set_xlabel('Revenue per Employee (USD)', fontsize=12)
+                axes[0, 0].set_ylabel('Frequency', fontsize=12)
+                axes[0, 0].set_title('Distribution of Revenue to Employee Ratio', fontsize=14, fontweight='bold')
+                axes[0, 0].grid(axis='y', alpha=0.3)
+                
+                # Add statistics text
+                mean_ratio = valid_ratio.mean()
+                median_ratio = valid_ratio.median()
+                stats_text = f'Mean: ${mean_ratio:,.2f}\nMedian: ${median_ratio:,.2f}'
+                axes[0, 0].text(0.7, 0.95, stats_text, transform=axes[0, 0].transAxes,
+                              fontsize=10, verticalalignment='top',
+                              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                
+                # 5b. Box plot
+                axes[0, 1].boxplot(valid_ratio, vert=True, patch_artist=True,
+                                  boxprops=dict(facecolor='lightblue', alpha=0.7))
+                axes[0, 1].set_ylabel('Revenue per Employee (USD)', fontsize=12)
+                axes[0, 1].set_title('Revenue to Employee Ratio - Box Plot', fontsize=14, fontweight='bold')
+                axes[0, 1].grid(axis='y', alpha=0.3)
+                
+                # 5c. Distribution by Cluster (if clusters exist)
+                if 'Cluster' in self.df.columns and self.clusters is not None:
+                    cluster_ratios = []
+                    cluster_labels = []
+                    for cluster_id in sorted(self.df['Cluster'].unique()):
+                        cluster_data = self.df[self.df['Cluster'] == cluster_id]
+                        cluster_ratio = cluster_data['Revenue_to_Employee_Ratio']
+                        cluster_ratio_valid = cluster_ratio[cluster_ratio > 0]
+                        if len(cluster_ratio_valid) > 0:
+                            cluster_ratios.append(cluster_ratio_valid.values)
+                            cluster_labels.append(f'Cluster {cluster_id}')
+                    
+                    if cluster_ratios:
+                        bp = axes[1, 0].boxplot(cluster_ratios, labels=cluster_labels, patch_artist=True)
+                        for patch in bp['boxes']:
+                            patch.set_facecolor('lightgreen')
+                            patch.set_alpha(0.7)
+                        axes[1, 0].set_ylabel('Revenue per Employee (USD)', fontsize=12)
+                        axes[1, 0].set_xlabel('Cluster', fontsize=12)
+                        axes[1, 0].set_title('Revenue to Employee Ratio by Cluster', fontsize=14, fontweight='bold')
+                        axes[1, 0].tick_params(axis='x', rotation=45)
+                        axes[1, 0].grid(axis='y', alpha=0.3)
+                
+                # 5d. Log scale histogram (for better visualization of wide range)
+                log_ratio = np.log10(valid_ratio + 1)  # +1 to handle zeros
+                axes[1, 1].hist(log_ratio, bins=50, edgecolor='black', alpha=0.7, color='coral')
+                axes[1, 1].set_xlabel('Log10(Revenue per Employee + 1)', fontsize=12)
+                axes[1, 1].set_ylabel('Frequency', fontsize=12)
+                axes[1, 1].set_title('Revenue to Employee Ratio (Log Scale)', fontsize=14, fontweight='bold')
+                axes[1, 1].grid(axis='y', alpha=0.3)
+                
+                plt.suptitle('Revenue to Employee Ratio Analysis', fontsize=16, fontweight='bold', y=0.995)
+                plt.tight_layout()
+                plt.savefig('revenue_to_employee_ratio.png', dpi=300, bbox_inches='tight')
+                plt.close()
+                print("Saved revenue_to_employee_ratio.png")
+            else:
+                print("⚠ Warning: No valid Revenue to Employee Ratio data for visualization")
+        
+        # 6. Business Metrics Visualization
+        business_metrics = [
+            'IT_Intensity',
+            'IT_Budget_Utilization',
+            'PS_Ratio',
+            'Market_Cap_per_Employee',
+            'Market_Value_to_IT_Spending',
+            'Underlying_Value'
+        ]
+        
+        available_metrics = [m for m in business_metrics if m in self.df.columns]
+        
+        if available_metrics:
+            n_metrics = len(available_metrics)
+            n_cols = 3
+            n_rows = (n_metrics + n_cols - 1) // n_cols
+            
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 6*n_rows))
+            if n_metrics == 1:
+                axes = [axes]
+            else:
+                axes = axes.flatten() if n_rows > 1 else [axes] if n_cols == 1 else axes
+            
+            for idx, metric in enumerate(available_metrics):
+                metric_data = self.df[metric]
+                valid_data = metric_data[metric_data > 0]
+                
+                if len(valid_data) > 0:
+                    # Histogram
+                    axes[idx].hist(valid_data, bins=50, edgecolor='black', alpha=0.7, color='steelblue')
+                    axes[idx].set_xlabel(metric.replace('_', ' '), fontsize=11)
+                    axes[idx].set_ylabel('Frequency', fontsize=11)
+                    axes[idx].set_title(f'{metric.replace("_", " ")} Distribution', fontsize=12, fontweight='bold')
+                    axes[idx].grid(axis='y', alpha=0.3)
+                    
+                    # Add statistics
+                    mean_val = valid_data.mean()
+                    median_val = valid_data.median()
+                    stats_text = f'Mean: {mean_val:,.2f}\nMedian: {median_val:,.2f}'
+                    axes[idx].text(0.7, 0.95, stats_text, transform=axes[idx].transAxes,
+                                  fontsize=9, verticalalignment='top',
+                                  bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                else:
+                    axes[idx].text(0.5, 0.5, f'No valid data\nfor {metric}', 
+                                  transform=axes[idx].transAxes,
+                                  ha='center', va='center', fontsize=12)
+                    axes[idx].set_title(f'{metric.replace("_", " ")}', fontsize=12)
+            
+            # Hide extra subplots
+            for idx in range(n_metrics, len(axes)):
+                axes[idx].set_visible(False)
+            
+            plt.suptitle('Business Metrics Distribution Analysis', fontsize=16, fontweight='bold', y=0.995)
+            plt.tight_layout()
+            plt.savefig('business_metrics_distribution.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            print("Saved business_metrics_distribution.png")
+            
+            # 6b. Business Metrics by Cluster (if clusters exist)
+            if 'Cluster' in self.df.columns and self.clusters is not None:
+                n_metrics = len(available_metrics)
+                n_cols = 3
+                n_rows = (n_metrics + n_cols - 1) // n_cols
+                
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 6*n_rows))
+                if n_metrics == 1:
+                    axes = [axes]
+                else:
+                    axes = axes.flatten() if n_rows > 1 else [axes] if n_cols == 1 else axes
+                
+                for idx, metric in enumerate(available_metrics):
+                    cluster_data_list = []
+                    cluster_labels = []
+                    
+                    for cluster_id in sorted(self.df['Cluster'].unique()):
+                        cluster_df = self.df[self.df['Cluster'] == cluster_id]
+                        cluster_metric = cluster_df[metric]
+                        cluster_metric_valid = cluster_metric[cluster_metric > 0]
+                        
+                        if len(cluster_metric_valid) > 0:
+                            cluster_data_list.append(cluster_metric_valid.values)
+                            cluster_labels.append(f'C{cluster_id}')
+                    
+                    if cluster_data_list:
+                        bp = axes[idx].boxplot(cluster_data_list, labels=cluster_labels, patch_artist=True)
+                        for patch in bp['boxes']:
+                            patch.set_facecolor('lightgreen')
+                            patch.set_alpha(0.7)
+                        axes[idx].set_ylabel(metric.replace('_', ' '), fontsize=11)
+                        axes[idx].set_xlabel('Cluster', fontsize=11)
+                        axes[idx].set_title(f'{metric.replace("_", " ")} by Cluster', fontsize=12, fontweight='bold')
+                        axes[idx].tick_params(axis='x', rotation=45)
+                        axes[idx].grid(axis='y', alpha=0.3)
+                    else:
+                        axes[idx].text(0.5, 0.5, f'No valid data\nfor {metric}', 
+                                      transform=axes[idx].transAxes,
+                                      ha='center', va='center', fontsize=12)
+                        axes[idx].set_title(f'{metric.replace("_", " ")} by Cluster', fontsize=12)
+                
+                # Hide extra subplots
+                for idx in range(n_metrics, len(axes)):
+                    axes[idx].set_visible(False)
+                
+                plt.suptitle('Business Metrics Comparison Across Clusters', fontsize=16, fontweight='bold', y=0.995)
+                plt.tight_layout()
+                plt.savefig('business_metrics_by_cluster.png', dpi=300, bbox_inches='tight')
+                plt.close()
+                print("Saved business_metrics_by_cluster.png")
     
     def generate_report(self, cluster_analysis: Dict, patterns: Dict, insights: str):
         """Generate a comprehensive report with detailed data implications"""
@@ -2476,8 +2956,8 @@ Target: Even distribution
         print("\n" + "="*80)
         print("STARTING FOCUSED COMPANY INTELLIGENCE ANALYSIS")
         print("="*80)
-        print("Clustering: 10 clusters based on Revenue (log10(1+x)), IT Budget, and IT Spending")
-        print("Analyzing: Revenue (log-transformed) | IT Budget | IT Spending")
+        print("Clustering: 10 clusters based on Revenue, IT Budget, and IT Spending (all log10-transformed)")
+        print("Analyzing: Revenue | IT Budget | IT Spending (all log10-transformed)")
         print("TF-IDF on: SIC Description | NAICS Description | NACE Rev 2 Description")
         print("Chi-square on: Entity Type | Ownership Type")
         print("Methods: K-Means Clustering | Logistic Regression | Dimensional Reduction | Train/Test Split")
@@ -2498,7 +2978,7 @@ Target: Even distribution
         # 3. Preprocess
         self.preprocess_data(exclude_cols=exclude_cols)
         
-        # 4. Cluster (using 10 clusters based on revenue log10(1+x), IT budget, and IT spending)
+        # 4. Cluster (using 10 clusters based on revenue, IT budget, and IT spending - all log10-transformed)
         if n_clusters is None:
             n_clusters = 10  # Default to 10 clusters for revenue-based clustering
         # Use stratified balanced method for optimal even distribution

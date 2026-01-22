@@ -153,12 +153,31 @@ class LatentSparseClustering:
         
         # Fill remaining missing values
         for col in numerical_cols:
-            if self.df_work[col].isnull().any():
-                self.df_work[col] = self.df_work[col].fillna(self.df_work[col].median())
+            if col in self.df_work.columns and self.df_work[col].isnull().any():
+                median_val = self.df_work[col].median()
+                if pd.notna(median_val):
+                    self.df_work[col] = self.df_work[col].fillna(median_val)
+                else:
+                    # If all values are NaN, fill with 0
+                    self.df_work[col] = self.df_work[col].fillna(0)
         
         for col in categorical_cols:
-            if self.df_work[col].isnull().any():
-                self.df_work[col] = self.df_work[col].fillna('Unknown')
+            if col in self.df_work.columns and self.df_work[col].isnull().any():
+                mode_val = self.df_work[col].mode()[0] if len(self.df_work[col].mode()) > 0 else 'Unknown'
+                self.df_work[col] = self.df_work[col].fillna(mode_val)
+        
+        # Final check - drop any rows that still have NaN in critical columns
+        critical_cols = [col for col in numerical_cols if col in self.df_work.columns]
+        if len(critical_cols) > 0:
+            rows_before = len(self.df_work)
+            self.df_work = self.df_work.dropna(subset=critical_cols)
+            rows_after = len(self.df_work)
+            if rows_before != rows_after:
+                print(f"  -> Dropped {rows_before - rows_after} rows with NaN in critical columns")
+                # Update scaled data to match
+                self.df_scaled = self.df_scaled.loc[self.df_work.index]
+                # Update sample count
+                self.feature_info['n_samples'] = len(self.df_work)
         
         # Step 1.3: Metric Mapping
         print("\nStep 1.3: Metric Mapping...")
@@ -281,10 +300,46 @@ class LatentSparseClustering:
             print("Using FAMD (Factor Analysis of Mixed Data)...")
             # Prepare data for FAMD
             famd_data = self.df_work[numerical_cols + categorical_cols].copy()
+            
+            # Ensure no NaN values remain
+            # Fill numerical NaN with median
+            for col in numerical_cols:
+                if col in famd_data.columns and famd_data[col].isnull().any():
+                    famd_data[col] = famd_data[col].fillna(famd_data[col].median())
+            
+            # Fill categorical NaN with mode or 'Unknown'
+            for col in categorical_cols:
+                if col in famd_data.columns and famd_data[col].isnull().any():
+                    mode_val = famd_data[col].mode()[0] if len(famd_data[col].mode()) > 0 else 'Unknown'
+                    famd_data[col] = famd_data[col].fillna(mode_val)
+            
+            # Double check for any remaining NaN
+            if famd_data.isnull().any().any():
+                print("Warning: Still have NaN values. Dropping rows with NaN...")
+                rows_before = len(famd_data)
+                famd_data = famd_data.dropna()
+                rows_after = len(famd_data)
+                print(f"  -> Dropped {rows_before - rows_after} rows with NaN")
+                # Update df_work and df_scaled to match
+                self.df_work = self.df_work.loc[famd_data.index].copy()
+                self.df_scaled = self.df_scaled.loc[famd_data.index].copy()
+            
+            # Verify no NaN before fitting
+            if famd_data.isnull().any().any():
+                print("ERROR: NaN values still present. Columns with NaN:")
+                print(famd_data.isnull().sum()[famd_data.isnull().sum() > 0])
+                raise ValueError("Cannot proceed with NaN values in FAMD input")
+            
+            # Update sample count if rows were dropped
+            if len(famd_data) != self.feature_info['n_samples']:
+                self.feature_info['n_samples'] = len(famd_data)
+                print(f"Updated sample count: {len(famd_data)}")
+            
             famd = FAMD(n_components=min(20, len(numerical_cols) + len(categorical_cols) - 1))
             famd.fit(famd_data)
             self.df_reduced = pd.DataFrame(
                 famd.transform(famd_data),
+                index=famd_data.index,
                 columns=[f'FAMD_{i+1}' for i in range(famd.n_components)]
             )
             self.reducer = famd
@@ -298,9 +353,16 @@ class LatentSparseClustering:
         else:
             print("Using PCA...")
             # Use only numerical features for PCA
+            # Ensure no NaN in scaled data
+            pca_data = self.df_scaled[numerical_cols].copy()
+            if pca_data.isnull().any().any():
+                print("Warning: NaN in scaled data. Filling with 0...")
+                pca_data = pca_data.fillna(0)
+            
             pca = PCA(n_components=min(20, len(numerical_cols)))
             self.df_reduced = pd.DataFrame(
-                pca.fit_transform(self.df_scaled[numerical_cols]),
+                pca.fit_transform(pca_data),
+                index=pca_data.index,
                 columns=[f'PC_{i+1}' for i in range(pca.n_components_)]
             )
             self.reducer = pca

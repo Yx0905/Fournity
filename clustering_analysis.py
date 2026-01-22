@@ -220,6 +220,10 @@ class LatentSparseClustering:
         # Step 2.1: Redundancy Pruning
         print("\nStep 2.1: Redundancy Pruning...")
         
+        # Filter to only columns that exist in df_work
+        numerical_cols = [col for col in numerical_cols if col in self.df_work.columns]
+        categorical_cols = [col for col in categorical_cols if col in self.df_work.columns]
+        
         # Correlation matrix for numericals
         if len(numerical_cols) > 1:
             corr_matrix = self.df_work[numerical_cols].corr().abs()
@@ -241,9 +245,11 @@ class LatentSparseClustering:
                         cols_to_drop.add(col2)
                 
                 for col in cols_to_drop:
-                    print(f"  -> Dropping {col}")
-                    numerical_cols.remove(col)
-                    self.df_work = self.df_work.drop(columns=[col])
+                    if col in self.df_work.columns:
+                        print(f"  -> Dropping {col}")
+                        if col in numerical_cols:
+                            numerical_cols.remove(col)
+                        self.df_work = self.df_work.drop(columns=[col])
             else:
                 print("No highly correlated numerical pairs found")
         
@@ -252,10 +258,14 @@ class LatentSparseClustering:
             print("\nChecking categorical redundancy...")
             # Simplified approach: drop low cardinality categoricals if they're redundant
             for col in categorical_cols:
-                if self.df_work[col].nunique() == 1:
+                if col in self.df_work.columns and self.df_work[col].nunique() == 1:
                     print(f"  -> Dropping {col} (single value)")
                     categorical_cols.remove(col)
                     self.df_work = self.df_work.drop(columns=[col])
+        
+        # Update feature_info with cleaned column lists
+        self.feature_info['numerical_cols'] = numerical_cols
+        self.feature_info['categorical_cols'] = categorical_cols
         
         # Step 2.2: Automated Scaling
         print("\nStep 2.2: Automated Scaling...")
@@ -283,7 +293,10 @@ class LatentSparseClustering:
         # Scale numerical features
         self.df_scaled = self.df_work.copy()
         if len(numerical_cols) > 0:
-            self.df_scaled[numerical_cols] = scaler.fit_transform(self.df_work[numerical_cols])
+            # Filter to only existing columns
+            available_num_for_scale = [col for col in numerical_cols if col in self.df_work.columns]
+            if len(available_num_for_scale) > 0:
+                self.df_scaled[available_num_for_scale] = scaler.fit_transform(self.df_work[available_num_for_scale])
         
         # Step 2.3: Dimensionality Reduction
         print("\nStep 2.3: Dimensionality Reduction...")
@@ -298,68 +311,179 @@ class LatentSparseClustering:
         
         if use_famd and FAMD_AVAILABLE and is_mixed:
             print("Using FAMD (Factor Analysis of Mixed Data)...")
+            
+            # Filter to only columns that actually exist in df_work
+            available_num_cols = [col for col in numerical_cols if col in self.df_work.columns]
+            available_cat_cols = [col for col in categorical_cols if col in self.df_work.columns]
+            
+            print(f"  Preparing FAMD with {len(available_num_cols)} numerical and {len(available_cat_cols)} categorical columns")
+            
             # Prepare data for FAMD
-            famd_data = self.df_work[numerical_cols + categorical_cols].copy()
+            famd_data = self.df_work[available_num_cols + available_cat_cols].copy()
+            
+            # Check initial NaN count
+            nan_count_before = famd_data.isnull().sum().sum()
+            if nan_count_before > 0:
+                print(f"  Found {nan_count_before} NaN values before cleaning")
             
             # Ensure no NaN values remain
-            # Fill numerical NaN with median
-            for col in numerical_cols:
-                if col in famd_data.columns and famd_data[col].isnull().any():
-                    famd_data[col] = famd_data[col].fillna(famd_data[col].median())
+            # Fill numerical NaN with median (or 0 if all NaN)
+            for col in available_num_cols:
+                if col in famd_data.columns:
+                    if famd_data[col].isnull().any():
+                        median_val = famd_data[col].median()
+                        if pd.isna(median_val) or pd.isnull(median_val):
+                            # All values are NaN, fill with 0
+                            print(f"    Warning: {col} has all NaN, filling with 0")
+                            famd_data[col] = famd_data[col].fillna(0)
+                        else:
+                            famd_data[col] = famd_data[col].fillna(median_val)
             
             # Fill categorical NaN with mode or 'Unknown'
-            for col in categorical_cols:
-                if col in famd_data.columns and famd_data[col].isnull().any():
-                    mode_val = famd_data[col].mode()[0] if len(famd_data[col].mode()) > 0 else 'Unknown'
-                    famd_data[col] = famd_data[col].fillna(mode_val)
+            for col in available_cat_cols:
+                if col in famd_data.columns:
+                    if famd_data[col].isnull().any():
+                        mode_vals = famd_data[col].mode()
+                        if len(mode_vals) > 0:
+                            mode_val = mode_vals[0]
+                        else:
+                            mode_val = 'Unknown'
+                        famd_data[col] = famd_data[col].fillna(mode_val)
+            
+            # Check for infinite values in numerical columns
+            for col in available_num_cols:
+                if col in famd_data.columns:
+                    if np.isinf(famd_data[col]).any():
+                        print(f"    Warning: {col} contains infinite values, replacing with NaN then median")
+                        famd_data[col] = famd_data[col].replace([np.inf, -np.inf], np.nan)
+                        median_val = famd_data[col].median()
+                        if pd.isna(median_val):
+                            famd_data[col] = famd_data[col].fillna(0)
+                        else:
+                            famd_data[col] = famd_data[col].fillna(median_val)
             
             # Double check for any remaining NaN
-            if famd_data.isnull().any().any():
-                print("Warning: Still have NaN values. Dropping rows with NaN...")
+            nan_count_after = famd_data.isnull().sum().sum()
+            if nan_count_after > 0:
+                print(f"  Warning: Still have {nan_count_after} NaN values after filling. Dropping rows...")
+                print("  Columns with NaN:")
+                nan_cols = famd_data.isnull().sum()[famd_data.isnull().sum() > 0]
+                for col, count in nan_cols.items():
+                    print(f"    {col}: {count} NaN")
+                
                 rows_before = len(famd_data)
                 famd_data = famd_data.dropna()
                 rows_after = len(famd_data)
                 print(f"  -> Dropped {rows_before - rows_after} rows with NaN")
+                
                 # Update df_work and df_scaled to match
                 self.df_work = self.df_work.loc[famd_data.index].copy()
                 self.df_scaled = self.df_scaled.loc[famd_data.index].copy()
             
-            # Verify no NaN before fitting
+            # Final verification - check for NaN and infinite values
             if famd_data.isnull().any().any():
-                print("ERROR: NaN values still present. Columns with NaN:")
+                print("ERROR: NaN values still present after all cleaning!")
+                print("Columns with NaN:")
                 print(famd_data.isnull().sum()[famd_data.isnull().sum() > 0])
-                raise ValueError("Cannot proceed with NaN values in FAMD input")
+                # Force fill any remaining NaN
+                print("Force filling remaining NaN...")
+                for col in famd_data.columns:
+                    if famd_data[col].isnull().any():
+                        if pd.api.types.is_numeric_dtype(famd_data[col]):
+                            famd_data[col] = famd_data[col].fillna(0)
+                        else:
+                            famd_data[col] = famd_data[col].fillna('Unknown')
             
+            # Check for infinite values one more time
+            num_cols = famd_data.select_dtypes(include=[np.number]).columns
+            if len(num_cols) > 0:
+                inf_mask = np.isinf(famd_data[num_cols]).any()
+                if inf_mask.any():
+                    print("Warning: Infinite values found, replacing...")
+                    for col in num_cols:
+                        if np.isinf(famd_data[col]).any():
+                            famd_data[col] = famd_data[col].replace([np.inf, -np.inf], 0)
+            
+            # Final check
+            if famd_data.isnull().any().any():
+                raise ValueError("Cannot proceed - NaN values persist after all cleaning")
+            
+            print(f"  ✓ FAMD data ready: {len(famd_data)} rows, {len(famd_data.columns)} columns, no NaN, no Inf")
+
             # Update sample count if rows were dropped
             if len(famd_data) != self.feature_info['n_samples']:
                 self.feature_info['n_samples'] = len(famd_data)
-                print(f"Updated sample count: {len(famd_data)}")
-            
-            famd = FAMD(n_components=min(20, len(numerical_cols) + len(categorical_cols) - 1))
-            famd.fit(famd_data)
-            self.df_reduced = pd.DataFrame(
-                famd.transform(famd_data),
-                index=famd_data.index,
-                columns=[f'FAMD_{i+1}' for i in range(famd.n_components)]
-            )
-            self.reducer = famd
-            
-            # Keep components explaining 80-90% variance
-            cumsum_var = np.cumsum(famd.explained_inertia_)
-            n_components = np.where(cumsum_var >= 0.85)[0][0] + 1
-            print(f"Variance explained by {n_components} components: {cumsum_var[n_components-1]:.2%}")
-            self.df_reduced = self.df_reduced.iloc[:, :n_components]
-            
-        else:
+                print(f"  Updated sample count: {len(famd_data)}")
+
+            # Remove zero-variance numerical columns (causes NaN during FAMD internal standardization)
+            num_cols_in_famd = [col for col in available_num_cols if col in famd_data.columns]
+            zero_var_cols = []
+            for col in num_cols_in_famd:
+                if famd_data[col].std() == 0 or famd_data[col].nunique() <= 1:
+                    zero_var_cols.append(col)
+            if zero_var_cols:
+                print(f"  Removing {len(zero_var_cols)} zero-variance numerical columns: {zero_var_cols}")
+                famd_data = famd_data.drop(columns=zero_var_cols)
+                available_num_cols = [c for c in available_num_cols if c not in zero_var_cols]
+
+            # Remove single-category categorical columns (causes issues in FAMD)
+            cat_cols_in_famd = [col for col in available_cat_cols if col in famd_data.columns]
+            single_cat_cols = []
+            for col in cat_cols_in_famd:
+                if famd_data[col].nunique() <= 1:
+                    single_cat_cols.append(col)
+            if single_cat_cols:
+                print(f"  Removing {len(single_cat_cols)} single-category categorical columns: {single_cat_cols}")
+                famd_data = famd_data.drop(columns=single_cat_cols)
+                available_cat_cols = [c for c in available_cat_cols if c not in single_cat_cols]
+
+            # Verify we still have columns to work with
+            if len(famd_data.columns) < 2:
+                raise ValueError("Not enough columns remaining after removing zero-variance columns")
+
+            n_components_famd = max(1, min(20, len(available_num_cols) + len(available_cat_cols) - 1))
+            print(f"  Fitting FAMD with {n_components_famd} components...")
+
+            try:
+                famd = FAMD(n_components=n_components_famd)
+                famd.fit(famd_data)
+                self.df_reduced = pd.DataFrame(
+                    famd.transform(famd_data),
+                    index=famd_data.index,
+                    columns=[f'FAMD_{i+1}' for i in range(famd.n_components)]
+                )
+                self.reducer = famd
+
+                # Keep components explaining 80-90% variance
+                cumsum_var = np.cumsum(famd.explained_inertia_)
+                n_components = np.where(cumsum_var >= 0.85)[0][0] + 1
+                print(f"Variance explained by {n_components} components: {cumsum_var[n_components-1]:.2%}")
+                self.df_reduced = self.df_reduced.iloc[:, :n_components]
+            except (ValueError, Exception) as e:
+                print(f"  FAMD failed with error: {e}")
+                print("  Falling back to PCA on numerical features only...")
+                use_famd = False  # Force fallback to PCA below
+
+        if not use_famd or not hasattr(self, 'df_reduced') or self.df_reduced is None:
             print("Using PCA...")
             # Use only numerical features for PCA
+            # Filter to only existing columns
+            available_num_for_pca = [col for col in numerical_cols if col in self.df_scaled.columns]
+            if len(available_num_for_pca) == 0:
+                raise ValueError("No numerical columns available for PCA")
+            
             # Ensure no NaN in scaled data
-            pca_data = self.df_scaled[numerical_cols].copy()
+            pca_data = self.df_scaled[available_num_for_pca].copy()
             if pca_data.isnull().any().any():
                 print("Warning: NaN in scaled data. Filling with 0...")
                 pca_data = pca_data.fillna(0)
             
-            pca = PCA(n_components=min(20, len(numerical_cols)))
+            # Check for infinite values
+            if np.isinf(pca_data.values).any():
+                print("Warning: Infinite values in PCA data. Replacing with 0...")
+                pca_data = pca_data.replace([np.inf, -np.inf], 0)
+            
+            pca = PCA(n_components=min(20, len(available_num_for_pca)))
             self.df_reduced = pd.DataFrame(
                 pca.fit_transform(pca_data),
                 index=pca_data.index,

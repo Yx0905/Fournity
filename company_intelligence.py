@@ -2380,54 +2380,76 @@ Format your response in clear, business-friendly language suitable for executive
         plt.close()
         print("Saved cluster_distribution.png")
         
-        # 2. Enhanced PCA visualization (2D) with feature importance
+        # 2. Enhanced PCA visualization (2D) with feature importance - IMPROVED VERSION
         if len(self.feature_names) > 2:
-            pca = PCA(n_components=2)
-            pca_result = pca.fit_transform(self.df_processed_scaled)
+            try:
+                # Try to use enhanced visualization
+                from visualization_improvements import create_enhanced_pca_visualization
+                create_enhanced_pca_visualization(
+                    self.df_processed_scaled,
+                    self.clusters,
+                    self.feature_names,
+                    save_path='pca_clusters.png'
+                )
+            except ImportError:
+                # Fallback to original visualization
+                pca = PCA(n_components=2)
+                pca_result = pca.fit_transform(self.df_processed_scaled)
 
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
 
-            # Left plot: PCA scatter
-            scatter = ax1.scatter(pca_result[:, 0], pca_result[:, 1],
-                               c=self.clusters, cmap='viridis', alpha=0.6, s=50)
-            ax1.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%} variance)')
-            ax1.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%} variance)')
-            ax1.set_title('Company Segments (PCA Visualization)')
-            ax1.grid(True, alpha=0.3)
-            plt.colorbar(scatter, ax=ax1, label='Cluster')
+                # Left plot: PCA scatter with improved styling
+                unique_clusters = sorted(set(self.clusters))
+                colors = plt.cm.Set3(np.linspace(0, 1, len(unique_clusters)))
+                
+                for i, cluster_id in enumerate(unique_clusters):
+                    mask = self.clusters == cluster_id
+                    ax1.scatter(pca_result[mask, 0], pca_result[mask, 1],
+                               c=[colors[i]], label=f'Cluster {cluster_id}',
+                               alpha=0.6, s=50, edgecolors='white', linewidths=0.5)
+                    
+                    # Add centroid
+                    centroid_x = pca_result[mask, 0].mean()
+                    centroid_y = pca_result[mask, 1].mean()
+                    ax1.scatter(centroid_x, centroid_y, c='black', marker='X', 
+                               s=200, edgecolors='white', linewidths=2, zorder=10)
+                
+                ax1.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.2%} variance)', fontweight='bold')
+                ax1.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.2%} variance)', fontweight='bold')
+                ax1.set_title('Company Segments (PCA Visualization)', fontweight='bold')
+                ax1.grid(True, alpha=0.3, linestyle='--')
+                ax1.legend(loc='best', framealpha=0.9)
 
-            # Right plot: Feature contributions to PCA components
-            # Get all feature names (numeric + TF-IDF if combined)
-            all_feature_names = self.df_processed_scaled.columns.tolist()
+                # Right plot: Feature contributions to PCA components
+                all_feature_names = self.df_processed_scaled.columns.tolist()
+                components_df = pd.DataFrame(
+                    pca.components_.T,
+                    columns=['PC1', 'PC2'],
+                    index=all_feature_names
+                )
 
-            components_df = pd.DataFrame(
-                pca.components_.T,
-                columns=['PC1', 'PC2'],
-                index=all_feature_names
-            )
+                # Plot top contributing features
+                components_df['abs_sum'] = components_df.abs().sum(axis=1)
+                top_features = components_df.nlargest(min(10, len(all_feature_names)), 'abs_sum')
 
-            # Plot top contributing features
-            components_df['abs_sum'] = components_df.abs().sum(axis=1)
-            top_features = components_df.nlargest(min(10, len(all_feature_names)), 'abs_sum')
+                x_pos = np.arange(len(top_features))
+                width = 0.35
+                ax2.barh(x_pos - width/2, top_features['PC1'], width, label='PC1', alpha=0.8, color='steelblue')
+                ax2.barh(x_pos + width/2, top_features['PC2'], width, label='PC2', alpha=0.8, color='coral')
+                ax2.set_yticks(x_pos)
+                ax2.set_yticklabels([f.split('(')[0].strip() if '(' in f else f for f in top_features.index], fontsize=9)
+                ax2.set_xlabel('Component Loading', fontweight='bold')
+                ax2.set_title('Top Feature Contributions to PCA', fontweight='bold')
+                ax2.legend()
+                ax2.grid(True, alpha=0.3, axis='x')
+                ax2.axvline(x=0, color='black', linestyle='-', linewidth=0.5)
 
-            x_pos = np.arange(len(top_features))
-            width = 0.35
-            ax2.barh(x_pos - width/2, top_features['PC1'], width, label='PC1', alpha=0.8)
-            ax2.barh(x_pos + width/2, top_features['PC2'], width, label='PC2', alpha=0.8)
-            ax2.set_yticks(x_pos)
-            ax2.set_yticklabels([f.split('(')[0].strip() if '(' in f else f for f in top_features.index], fontsize=9)
-            ax2.set_xlabel('Component Loading')
-            ax2.set_title('Top Feature Contributions to PCA')
-            ax2.legend()
-            ax2.grid(True, alpha=0.3, axis='x')
-            ax2.axvline(x=0, color='black', linestyle='-', linewidth=0.5)
-
-            plt.tight_layout()
-            plt.savefig('pca_clusters.png', dpi=300, bbox_inches='tight')
-            plt.close()
-            print("Saved pca_clusters.png (with feature importance)")
+                plt.tight_layout()
+                plt.savefig('pca_clusters.png', dpi=300, bbox_inches='tight')
+                plt.close()
+                print("Saved pca_clusters.png (with feature importance)")
         
-        # 3. Feature comparison across clusters - TARGET FEATURES ONLY
+        # 3. Feature comparison across clusters - ENHANCED VERSION
         # Get target columns
         if hasattr(self, 'found_numeric') and self.found_numeric:
             numeric_cols = list(self.found_numeric.values())
@@ -2436,58 +2458,99 @@ Format your response in clear, business-friendly language suitable for executive
             numeric_cols = [col for col in numeric_cols if col != 'Cluster']
         
         if numeric_cols:
-            # Use all target features (up to 6)
-            top_features = numeric_cols[:6]
-            n_features = len(top_features)
-            n_cols = min(3, n_features)
-            n_rows = (n_features + n_cols - 1) // n_cols
-            
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 4*n_rows))
-            if n_features == 1:
-                axes = [axes]
-            else:
-                axes = axes.flatten() if n_rows > 1 else [axes] if n_cols == 1 else axes
-            
-            for idx, feature in enumerate(top_features):
-                # FIXED: Apply log10 transformation to handle skewed financial data
-                feature_data = self.df[feature].copy()
-
-                # Check if data spans multiple orders of magnitude (skewed)
-                valid_data = feature_data[feature_data > 0]
-                if len(valid_data) > 0:
-                    data_range = valid_data.max() / (valid_data.min() + 1e-10)
-                    use_log = data_range > 100  # Use log scale if range > 100x
+            try:
+                # Try to use enhanced visualization
+                from visualization_improvements import create_enhanced_feature_comparison
+                create_enhanced_feature_comparison(
+                    self.df,
+                    self.clusters,
+                    numeric_cols,
+                    save_path='feature_comparison.png',
+                    max_features=6
+                )
+            except ImportError:
+                # Fallback to original visualization with improvements
+                top_features = numeric_cols[:6]
+                n_features = len(top_features)
+                n_cols = min(3, n_features)
+                n_rows = (n_features + n_cols - 1) // n_cols
+                
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=(7*n_cols, 5*n_rows))
+                if n_features == 1:
+                    axes = [axes]
                 else:
-                    use_log = False
+                    axes = axes.flatten() if n_rows > 1 else [axes] if n_cols == 1 else axes
+                
+                # Get cluster colors
+                unique_clusters = sorted(set(self.clusters))
+                colors = plt.cm.Set3(np.linspace(0, 1, len(unique_clusters)))
+                cluster_colors = {cluster: colors[i] for i, cluster in enumerate(unique_clusters)}
+                
+                for idx, feature in enumerate(top_features):
+                    feature_data = self.df[feature].copy()
 
-                if use_log:
-                    # Create log-transformed column for visualization
-                    log_col_name = f'_log_{feature}'
-                    self.df[log_col_name] = np.where(
-                        self.df[feature] > 0,
-                        np.log10(self.df[feature] + 1),
-                        np.nan
-                    )
-                    self.df.boxplot(column=log_col_name, by='Cluster', ax=axes[idx])
-                    axes[idx].set_title(f'{feature}\n(Log10 Scale)')
-                    axes[idx].set_ylabel('Log10(value + 1)')
-                    # Clean up temporary column
-                    self.df.drop(columns=[log_col_name], inplace=True)
-                else:
-                    self.df.boxplot(column=feature, by='Cluster', ax=axes[idx])
-                    axes[idx].set_title(f'{feature}')
+                    # Check if data spans multiple orders of magnitude (skewed)
+                    valid_data = feature_data[feature_data > 0]
+                    if len(valid_data) > 0:
+                        data_range = valid_data.max() / (valid_data.min() + 1e-10)
+                        use_log = data_range > 100
+                    else:
+                        use_log = False
 
-                axes[idx].set_xlabel('Cluster')
+                    # Prepare data for each cluster
+                    plot_data = []
+                    plot_labels = []
+                    plot_colors_list = []
+                    
+                    for cluster_id in unique_clusters:
+                        mask = self.clusters == cluster_id
+                        cluster_data = feature_data[mask].dropna()
+                        
+                        if len(cluster_data) > 0:
+                            if use_log:
+                                cluster_data = np.log10(cluster_data + 1)
+                            plot_data.append(cluster_data.values)
+                            plot_labels.append(f'C{cluster_id}\n(n={len(cluster_data)})')
+                            plot_colors_list.append(cluster_colors[cluster_id])
+                    
+                    # Create enhanced boxplot with colors
+                    if plot_data:
+                        bp = axes[idx].boxplot(plot_data, labels=plot_labels, 
+                                              patch_artist=True, widths=0.6)
+                        
+                        # Color the boxes
+                        for patch, color in zip(bp['boxes'], plot_colors_list):
+                            patch.set_facecolor(color)
+                            patch.set_alpha(0.7)
+                            patch.set_edgecolor('black')
+                            patch.set_linewidth(1.5)
+                        
+                        # Add mean markers
+                        for i, data in enumerate(plot_data):
+                            mean_val = np.mean(data)
+                            axes[idx].scatter(i+1, mean_val, color='red', marker='D', 
+                                            s=100, zorder=10, edgecolors='white', linewidths=1)
+                        
+                        axes[idx].set_ylabel(
+                            f'Log10({feature} + 1)' if use_log else feature,
+                            fontweight='bold'
+                        )
+                        axes[idx].set_title(
+                            f'{feature}\n{"(Log Scale)" if use_log else "(Linear Scale)"}',
+                            fontweight='bold'
+                        )
+                        axes[idx].grid(True, alpha=0.3, axis='y', linestyle='--')
 
-            # Hide extra subplots
-            for idx in range(n_features, len(axes)):
-                axes[idx].set_visible(False)
+                # Hide extra subplots
+                for idx in range(n_features, len(axes)):
+                    axes[idx].set_visible(False)
 
-            plt.suptitle('Target Feature Comparison Across Clusters (Log Scale for Skewed Data)', y=1.02)
-            plt.tight_layout()
-            plt.savefig('feature_comparison.png', dpi=300, bbox_inches='tight')
-            plt.close()
-            print("Saved feature_comparison.png")
+                plt.suptitle('Enhanced Feature Comparison Across Clusters', 
+                           fontsize=14, fontweight='bold', y=0.995)
+                plt.tight_layout(rect=[0, 0, 1, 0.98])
+                plt.savefig('feature_comparison.png', dpi=300, bbox_inches='tight')
+                plt.close()
+                print("Saved feature_comparison.png")
         
         # 4. Interactive Plotly visualization
         if len(self.feature_names) > 2:

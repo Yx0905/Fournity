@@ -1,510 +1,503 @@
-# Company Intelligence Analysis System
-
-An AI-driven company intelligence system that analyzes company data to generate actionable insights through data-driven segmentation, clustering, and predictive modeling.
-
-## Overview
-
-This system provides comprehensive analysis of company datasets, including:
-- **Data Cleaning**: Automatic filtering of inactive companies
-- **Data Transformation**: Log10 transformation of all numeric data for better normalization
-- **Clustering**: K-Means clustering with balanced distribution options
-- **Pattern Recognition**: Outlier detection, correlation analysis, and anomaly identification
-- **Predictive Modeling**: Logistic and linear regression models
-- **Dimensionality Reduction**: PCA, t-SNE, and UMAP visualization
-- **LLM-Powered Insights**: Optional AI-generated insights using OpenAI or DeepSeek APIs
-- **Comprehensive Reporting**: Detailed analysis reports with visualizations
-
-## Features
-
-### Core Functionality
-
-1. **Data Loading & Cleaning**
-   - Supports Excel (.xlsx, .xls) and CSV file formats
-   - Automatic filtering of inactive companies
-   - Missing data handling with intelligent imputation
-   - Outlier detection and mitigation
-
-2. **Data Preprocessing**
-   - Log10 transformation of all numeric columns (handles zeros and negatives)
-   - StandardScaler and RobustScaler for feature normalization
-   - Automatic column detection using pattern matching
-   - Focus on key metrics: Revenue, Employee Total, IT Budget, IT Spending, Market Value
-
-3. **Clustering Analysis**
-   - Optimal cluster determination using elbow method and silhouette score
-   - Balanced K-Means clustering for even distribution
-   - Stratified balanced clustering for optimal results
-   - DBSCAN clustering option for density-based segmentation
-
-4. **Statistical Analysis**
-   - Chi-square tests for categorical variables
-   - Correlation analysis between features
-   - Outlier detection using IQR method
-   - Cluster comparison and profiling
-
-5. **Machine Learning Models**
-   - Logistic Regression for cluster classification
-   - Linear Regression for revenue prediction
-   - Train/test split with performance metrics
-   - Feature importance analysis
-
-6. **Dimensionality Reduction**
-   - Principal Component Analysis (PCA)
-   - t-SNE visualization (optional)
-   - UMAP visualization (optional)
-   - 2D/3D scatter plots
-
-7. **Business Metrics Calculation**
-   - Revenue to Employee Ratio
-   - IT Intensity (IT Spending / Revenue)
-   - IT Budget Utilization (IT Budget / IT Spending)
-   - PS Ratio (Price-to-Sales: Market Value / Revenue)
-   - Market Cap per Employee
-   - Market Value to IT Spending Ratio
-   - Underlying Value (Revenue/Employee × IT Intensity × Employees)
-
-8. **Visualization**
-   - Cluster distribution charts
-   - Feature comparison plots
-   - Dimensionality reduction visualizations
-   - Regression analysis plots
-   - Revenue to Employee Ratio distribution analysis
-   - Business metrics distribution and cluster comparison
-
-8. **AI-Powered Insights**
-   - LLM-generated insights using OpenAI or DeepSeek APIs
-   - Rule-based insights as fallback
-   - Comprehensive analysis reports
-
-## Installation
-
-### Prerequisites
-
-- Python 3.7 or higher
-- pip package manager
-
-### Required Packages
-
-```bash
-pip install pandas numpy scikit-learn matplotlib seaborn plotly scipy openpyxl python-dotenv
-```
-
-### Optional Packages (for enhanced features)
-
-```bash
-# For LLM insights
-pip install openai
-
-# For t-SNE visualization
-pip install scikit-learn[tsne]
-
-# For UMAP visualization
-pip install umap-learn
-```
-
-## How to Generate the Report
-
-### Method 1: Quick Report Generation (Easiest - Recommended)
-
-**Using Python Script:**
-
-Create a file called `generate_report.py`:
-
-```python
-from company_intelligence import CompanyIntelligence
-import os
-from dotenv import load_dotenv
-
-# Load environment variables (for API key - optional)
-load_dotenv()
-
-# Initialize the analyzer
-data_path = 'champions_group_data.xlsx'
-api_key = os.getenv('OPENAI_API_KEY')  # Optional: for LLM insights
-
-analyzer = CompanyIntelligence(data_path, api_key=api_key)
-
-# Run complete analysis pipeline (generates report automatically)
-print("Starting analysis...")
-results = analyzer.run_full_analysis()
-
-print("\n" + "="*60)
-print("Report Generated Successfully!")
-print("="*60)
-print("Report saved to: company_intelligence_report.txt")
-print("CSV with clusters saved to: companies_with_segments.csv")
-print("Visualizations saved as PNG files")
-```
-
-**Run it:**
-```bash
-python generate_report.py
-```
-
-### Method 2: Using Jupyter Notebook
-
-1. Open `company_intelligence.ipynb` in Jupyter
-2. Run all cells sequentially, OR
-3. Run the "Quick Full Analysis" cell at the bottom:
-
-```python
-# Run complete analysis pipeline
-results = analyzer.run_full_analysis(n_clusters=None)  # None = auto-determine
-
-# Access results
-print("\nAnalysis complete!")
-print(f"Clusters identified: {len(set(analyzer.clusters))}")
-print("\nCheck generated files for detailed results.")
-```
-
-### Method 3: Step-by-Step (For Customization)
-
-For more control over each step:
-
-```python
-from company_intelligence import CompanyIntelligence
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# Initialize
-analyzer = CompanyIntelligence('champions_group_data.xlsx', api_key=os.getenv('OPENAI_API_KEY'))
-
-# Step 1: Preprocess data (includes log10 transformation and inactive company filtering)
-analyzer.preprocess_data()
-
-# Step 2: Determine optimal clusters
-optimal_k = analyzer.determine_optimal_clusters(max_k=10)
-
-# Step 3: Perform clustering
-analyzer.perform_clustering(n_clusters=optimal_k)
-
-# Step 4: Analyze clusters
-cluster_analysis = analyzer.analyze_clusters()
-
-# Step 5: Identify patterns
-patterns = analyzer.identify_patterns()
-
-# Step 6: Generate insights (LLM or rule-based)
-insights = analyzer.generate_llm_insights(cluster_analysis, patterns)
-
-# Step 7: Generate visualizations
-analyzer.visualize_results()
-
-# Step 8: Generate and save the report
-report = analyzer.generate_report(cluster_analysis, patterns, insights)
-# Report is automatically saved to: company_intelligence_report.txt
-
-# Step 9: Export data with clusters
-analyzer.df.to_csv('companies_with_segments.csv', index=False)
-```
-
-## Quick Start
-
-### Basic Usage
-
-```python
-from company_intelligence import CompanyIntelligence
-import os
-from dotenv import load_dotenv
-
-# Load environment variables (for API key)
-load_dotenv()
-
-# Initialize the analyzer
-data_path = 'champions_group_data.xlsx'
-api_key = os.getenv('OPENAI_API_KEY')  # Optional
-
-analyzer = CompanyIntelligence(data_path, api_key=api_key)
-
-# Run complete analysis pipeline
-results = analyzer.run_full_analysis()
-```
-
-### Step-by-Step Usage
-
-```python
-from company_intelligence import CompanyIntelligence
-
-# 1. Initialize
-analyzer = CompanyIntelligence('champions_group_data.xlsx')
-
-# 2. Explore data
-analyzer.explore_data()
-
-# 3. Preprocess data (includes log10 transformation and inactive company filtering)
-analyzer.preprocess_data()
-
-# 4. Determine optimal clusters
-optimal_k = analyzer.determine_optimal_clusters(max_k=10)
-
-# 5. Perform clustering
-analyzer.perform_clustering(n_clusters=optimal_k)
-
-# 6. Analyze clusters
-cluster_analysis = analyzer.analyze_clusters()
-
-# 7. Compare clusters
-comparison = analyzer.compare_clusters()
-
-# 8. Identify patterns
-patterns = analyzer.identify_patterns()
-
-# 9. Generate insights
-insights = analyzer.generate_llm_insights(cluster_analysis, patterns)
-
-# 10. Visualize results
-analyzer.visualize_results()
-
-# 11. Generate report
-report = analyzer.generate_report(cluster_analysis, patterns, insights)
-
-# 12. Export results
-analyzer.df.to_csv('companies_with_segments.csv', index=False)
-```
-
-## Data Requirements
-
-### Required Columns
-
-The system automatically detects columns using pattern matching. Expected columns include:
-
-**Numeric Columns:**
-- Revenue (USD) - `Revenue`, `Revenue (USD)`, `revenue_usd`, etc.
-- Employee Total - `Employees Total`, `employee_total`, `total_employees`, etc.
-- Employee Single Sites - `Employees Single Site`, `employee_single_sites`, etc.
-- Market Value - `Market Value (USD)`, `market_value`, `market_cap`, etc.
-- IT Budget - `IT Budget`, `it_budget`, `technology_budget`, etc.
-- IT Spending - `IT spend`, `it_spending`, `technology_spending`, etc.
-
-**Categorical Columns:**
-- Company Status - `Company Status (Active/Inactive)`, `status`, etc.
-- Entity Type - `Entity Type`, `entity_type`, etc.
-- Ownership Type - `Ownership Type`, `ownership_type`, etc.
-
-**Text Columns (for TF-IDF):**
-- SIC Description - `SIC Description`, `sic_description`, etc.
-- NAICS Description - `NAICS Description`, `naics_description`, etc.
-- NACE Description - `NACE Rev 2 Description`, `nace_description`, etc.
-
-### Data Format
-
-- **File Format**: Excel (.xlsx, .xls) or CSV
-- **Encoding**: UTF-8 (for CSV files)
-- **Missing Values**: Handled automatically (median imputation for numeric, mode for categorical)
-
-## Key Methods
-
-### Data Management
-
-- `load_data()`: Load data from Excel or CSV file
-- `filter_inactive_companies()`: Remove inactive companies from dataset
-- `explore_data()`: Perform initial data exploration
-- `preprocess_data(exclude_cols=None)`: Preprocess data with log10 transformation
-
-### Clustering
-
-- `determine_optimal_clusters(max_k=10)`: Find optimal number of clusters
-- `perform_clustering(n_clusters=None, method='kmeans', balanced=True)`: Perform clustering
-- `analyze_clusters()`: Analyze characteristics of each cluster
-- `compare_clusters(feature=None)`: Compare clusters across features
-
-### Analysis
-
-- `identify_patterns()`: Identify outliers, correlations, and anomalies
-- `apply_tfidf(text_columns, max_features=100)`: Apply TF-IDF to text columns
-- `perform_chi_square_test(categorical_cols)`: Chi-square tests for categorical variables
-- `apply_dimensionality_reduction(method='pca', n_components=2)`: Dimensionality reduction
-
-### Machine Learning
-
-- `train_logistic_regression(test_size=0.2)`: Train logistic regression model
-- `train_linear_regression(target_feature, test_size=0.2)`: Train linear regression model
+# AI-Driven Company Intelligence System
+
+A comprehensive Python-based machine learning system for analyzing company data to generate actionable business insights through data-driven segmentation, statistical analysis, and predictive modeling.
+
+## 📋 Overview
+
+This system transforms raw company attributes (financial metrics, employee data, technology infrastructure, industry classifications) into interpretable company intelligence. It enables:
+
+- **Company Segmentation**: Identify and group companies with similar characteristics using advanced clustering algorithms
+- **Pattern Analysis**: Discover key differences, similarities, and anomalies across company segments
+- **Business Insights**: Generate data-grounded explanations for decision-making
+- **Predictive Modeling**: Forecast company performance and predict segment membership
+- **Statistical Validation**: Comprehensive statistical tests with proper assumption checking
+
+## 🏗️ System Architecture
+
+The system consists of three main components:
+
+### 1. **Data Processing** (`process_champions_data.py`)
+Preprocesses raw company data and calculates derived business metrics.
+
+**Key Features:**
+- Removes duplicate rows and invalid entries (zero employees, revenue, or market value)
+- Calculates derived metrics:
+  - Revenue per Employee
+  - Market Value per Employee
+  - IT Spend Ratio
+  - Employees per Site
+  - Technology Density Index
+  - Company Age
+  - Geographic Dispersion
+- Handles multiple column name variations (case-insensitive pattern matching)
+
+### 2. **Clustering Analysis** (`clustering_analysis.py`)
+Implements a comprehensive 4-phase Latent-Sparse Clustering workflow.
+
+**4-Phase Workflow:**
+- **Phase 1: Context & Meta-Data Analysis**
+  - Feature profiling and sparsity checks
+  - Metric mapping and data quality assessment
+- **Phase 2: Filtering & Encoding Engine**
+  - Redundancy pruning
+  - Scaling and normalization
+  - Dimensionality reduction (FAMD for mixed data, PCA for numerical)
+- **Phase 3: Iterative Clustering Loop**
+  - Hyperparameter optimization
+  - Validation and stability testing
+  - Multiple algorithm support (K-Means, K-Medoids, DBSCAN, HDBSCAN)
+- **Phase 4: Interpretability**
+  - Feature importance extraction
+  - Cluster profiling
+  - Comprehensive visualizations
+
+### 3. **Company Intelligence** (`company_intelligence.py`)
+Main analysis engine with comprehensive ML and statistical capabilities.
+
+**Core Class: `CompanyIntelligence`**
+
+## 🔧 Key Features
+
+### Data Preprocessing
+- **Intelligent Column Matching**: Pattern-based column detection handles various naming conventions
+- **Feature Engineering**: 
+  - Company age calculation from year founded
+  - Business indicator derivation (Market Value/Revenue, IT Investment Intensity)
+  - Range parsing (handles "X to Y", "X-Y", "<X", ">X" formats)
+- **Outlier Handling**: IQR method with winsorization (caps outliers instead of removing rows)
+- **Missing Value Imputation**: Median imputation for numeric features
+- **Data Validation**: Year validation (checks for future dates, invalid years)
+
+### Clustering & Segmentation
+- **Multi-Metric Validation**: 
+  - Silhouette Score (cluster quality)
+  - Davies-Bouldin Index (cluster separation)
+  - Calinski-Harabasz Index (variance ratio)
+- **Business-Optimized K Selection**: 
+  - Balances statistical quality with business practicality
+  - Prefers K=4-8 for actionable segmentation
+  - Configurable threshold (default: 70% of max score)
+- **Clustering Algorithms**: K-Means (default), DBSCAN (optional)
+
+### Machine Learning Models
+
+#### Logistic Regression (Cluster Prediction)
+- **Interpretable Features**: Uses original features (not PCA) for interpretable coefficients
+- **Cross-Validation**: 5-fold CV for stable performance estimates
+- **Data Leakage Prevention**: Proper train/test split before scaling
+- **Feature Importance**: Maps coefficients to actual feature names
+
+#### Linear Regression (Performance Forecasting)
+- **Regularization**: Ridge (default), Lasso, or ElasticNet to handle multicollinearity
+- **VIF Check**: Variance Inflation Factor calculation to detect multicollinearity
+- **Proper Data Splitting**: Split before scaling to prevent data leakage
+- **Target Features**: Revenue or Market Value prediction
+
+### Statistical Analysis
+
+#### Chi-Square Tests
+- **Assumption Validation**: Checks expected frequency ≥ 5 requirement
+- **Multiple Testing Correction**: Bonferroni, FDR-BH, or FDR-BY methods
+- **Comprehensive Reporting**: Detailed statistics and significance testing
+
+#### Dimensionality Reduction
+- **PCA**: Principal Component Analysis
+- **TruncatedSVD**: Singular Value Decomposition
+- **t-SNE**: Scaled perplexity based on dataset size (`sqrt(n_samples)`)
+- **UMAP**: Uniform Manifold Approximation (optional)
+
+### Text Analysis
+- **TF-IDF Vectorization**: Extracts features from industry descriptions (SIC, NAICS, NACE)
+- **Interpretable Features**: Uses actual term names instead of generic "TFIDF_0"
+- **Separate Processing**: Can be applied per text source (future enhancement)
+
+### Business Indicators
+Automatically calculates 10+ derived business metrics:
+
+1. **Market Value to Revenue Ratio** - Identifies growth vs. value companies
+2. **IT Investment Intensity** - Tech-forward vs. traditional segmentation
+3. **Single-Site Concentration Ratio** - Geographic strategy indicator
+4. **Workforce Technology Ratio** - Knowledge economy indicator
+5. **Technology Sophistication Index** - IT maturity score
+6. **Mobile vs. Desktop Ratio** - Remote work culture indicator
+7. **Growth Potential Index** - Composite growth indicator
+8. **Company Maturity Stage** - Startup/Growth/Mature/Established (configurable thresholds)
+9. **Revenue Scale Category** - Quantile-based segmentation (Micro/Small/Mid-Market/Enterprise)
+10. **Employee Scale Category** - Size-based classification
+
+### LLM-Powered Insights (Optional)
+- **OpenAI/DeepSeek Integration**: Generates natural language insights
+- **Temperature Control**: Lower temperature (0.3) for deterministic analytical output
+- **Fallback**: Rule-based insights if LLM unavailable
+- **Auto-Detection**: Automatically tries DeepSeek first, then OpenAI
 
 ### Visualization
+- Cluster distribution charts
+- PCA 2D/3D visualizations
+- Feature comparison boxplots
+- Interactive Plotly visualizations
+- Dimensionality reduction comparisons
+- Model performance plots
 
-- `visualize_results()`: Generate all visualizations
-- `visualize_dimensionality_reduction(methods=['pca', 'tsne'])`: Visualize reduced dimensions
+## 📦 Installation
 
-### Reporting
+### Prerequisites
+- Python 3.8 or higher
+- pip package manager
 
-- `generate_llm_insights(cluster_analysis, patterns)`: Generate AI-powered insights
-- `generate_rule_based_insights(cluster_analysis, patterns)`: Generate rule-based insights
-- `generate_report(cluster_analysis, patterns, insights)`: Generate comprehensive report
-- `run_full_analysis(n_clusters=None, exclude_cols=None)`: Run complete analysis pipeline
+### Setup
 
-## Data Processing Details
+1. **Clone or navigate to the project directory**
 
-### Log10 Transformation
+2. **Create a virtual environment (recommended)**
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
-All numeric data is automatically transformed using log base 10:
-- Formula: `log10(1 + abs(x))`
-- Handles zeros and negative values
-- Improves normalization and reduces impact of outliers
-- Original values preserved with `_original` suffix
+3. **Install required packages**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-### Business Metrics
+4. **Optional: Install advanced statistical libraries**
+   ```bash
+   pip install statsmodels  # For VIF and multiple testing correction
+   ```
 
-The system automatically calculates the following business metrics using original values (before log transformation):
+5. **Optional: Set up API key for LLM insights**
+   - Create a `.env` file in the project directory
+   - For DeepSeek: `DEEPSEEK_API_KEY=your_deepseek_api_key_here`
+   - For OpenAI: `OPENAI_API_KEY=your_openai_api_key_here`
+   - Or set environment variables:
+     ```bash
+     export DEEPSEEK_API_KEY=your_key_here
+     export OPENAI_API_KEY=your_key_here
+     ```
 
-1. **Revenue_to_Employee_Ratio**: Revenue per employee
-   - Formula: `Revenue / (Employees + 1)`
+## 🚀 Usage
 
-2. **IT_Intensity**: IT spending efficiency
-   - Formula: `IT Spending / Revenue`
-   - Higher values indicate higher IT investment relative to revenue
+### Quick Start
 
-3. **IT_Budget_Utilization**: IT budget usage efficiency
-   - Formula: `IT Budget / IT Spending`
-   - Values > 1 indicate overspending, < 1 indicates underspending
+#### 1. Data Processing
+```bash
+python3 process_champions_data.py
+```
+Processes raw data and generates `champions_group_processed.xlsx` with derived metrics.
 
-4. **PS_Ratio**: Price-to-Sales ratio
-   - Formula: `Market Value / Revenue`
-   - Valuation metric comparing market value to revenue
+#### 2. Clustering Analysis
+```bash
+python3 clustering_analysis.py
+```
+Runs comprehensive 4-phase clustering workflow.
 
-5. **Market_Cap_per_Employee**: Market capitalization per employee
-   - Formula: `Market Value / (Employees + 1)`
-   - Indicates market value efficiency per employee
+#### 3. Company Intelligence Analysis
 
-6. **Market_Value_to_IT_Spending**: Market value relative to IT investment
-   - Formula: `Market Value / (IT Spending + 1)`
-   - Shows market valuation per IT dollar spent
+**Command Line:**
+```bash
+python company_intelligence.py
+```
+Uses `champions_group_data.xlsx` by default.
 
-7. **Underlying_Value**: Composite efficiency metric
-   - Formula: `(Revenue/Employee) × IT Intensity × Employees`
-   - Combines revenue efficiency, IT intensity, and scale
-
-All metrics are automatically calculated during preprocessing and included in the exported CSV file.
-
-### Inactive Company Filtering
-
-Companies are automatically filtered based on status:
-- **Kept**: "Active", "active", "ACTIVE", "Act", "A", "1", "True", "Yes", "Y" (case-insensitive)
-- **Removed**: "Inactive", "inactive", "INACTIVE", "Inact", "I", "0", "False", "No", "N" (case-insensitive)
-- **Kept**: Missing/NaN status values (assumed active)
-
-### Scaling Methods
-
-- **StandardScaler**: Used for columns without significant outliers
-- **RobustScaler**: Used for columns with >5% outliers (outlier-resistant)
-
-## Output Files
-
-The system generates several output files:
-
-1. **companies_with_segments.csv**: Dataset with cluster labels (includes Revenue_to_Employee_Ratio metric)
-2. **company_intelligence_report.txt**: Comprehensive analysis report
-3. **Visualization files** (PNG):
-   - `cluster_distribution.png` - Distribution of companies across clusters
-   - `feature_comparison.png` - Feature comparison across clusters
-   - `revenue_to_employee_ratio.png` - Revenue to Employee ratio distribution analysis
-   - `business_metrics_distribution.png` - Distribution of all business metrics
-   - `business_metrics_by_cluster.png` - Business metrics comparison across clusters
-   - `linear_regression_results.png` - Linear regression analysis
-   - `pca_clusters.png` - PCA visualization
-   - Dimensionality reduction plots
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file in the project root:
-
-```env
-# For OpenAI
-OPENAI_API_KEY=your_openai_api_key_here
-
-# For DeepSeek (alternative)
-DEEPSEEK_API_KEY=your_deepseek_api_key_here
+**Custom Data File:**
+```bash
+python company_intelligence.py path/to/your/data.xlsx
 ```
 
-### API Providers
+**Jupyter Notebook:**
+```bash
+jupyter notebook company_intelligence.ipynb
+```
 
-The system supports multiple LLM providers:
-- **OpenAI**: Default provider, uses `OPENAI_API_KEY`
-- **DeepSeek**: Alternative provider, uses `DEEPSEEK_API_KEY`
-- **Auto**: Automatically detects and uses available API key
-
-## Jupyter Notebook
-
-A Jupyter notebook (`company_intelligence.ipynb`) is provided for interactive analysis:
-
-1. Open the notebook
-2. Run cells sequentially
-3. Modify parameters as needed
-4. View results inline
-
-## Example Use Cases
-
-### 1. Market Segmentation
+### Programmatic Usage
 
 ```python
-analyzer = CompanyIntelligence('company_data.xlsx')
-analyzer.preprocess_data()
-analyzer.perform_clustering(n_clusters=5)
+from company_intelligence import CompanyIntelligence
+
+# Initialize analyzer
+analyzer = CompanyIntelligence(
+    data_path='champions_group_data.xlsx',
+    api_key='your_api_key'  # Optional
+)
+
+# Step 1: Explore data
+analyzer.explore_data()
+
+# Step 2: Preprocess (automatically calculates business indicators)
+analyzer.preprocess_data(
+    calculate_indicators=True,
+    include_key_indicators_in_clustering=True
+)
+
+# Step 3: Determine optimal clusters
+optimal_k = analyzer.determine_optimal_clusters(max_k=10, practical_threshold=0.70)
+
+# Step 4: Perform clustering
+analyzer.perform_clustering(n_clusters=optimal_k)
+
+# Step 5: Analyze clusters
 cluster_analysis = analyzer.analyze_clusters()
-```
 
-### 2. Revenue Prediction
+# Step 6: Compare clusters
+comparison = analyzer.compare_clusters()
 
-```python
-analyzer.train_linear_regression(target_feature='Revenue (USD)')
-```
-
-### 3. Industry Classification
-
-```python
-analyzer.apply_tfidf(text_columns=['SIC Description', 'NAICS Description'])
-analyzer.train_logistic_regression()
-```
-
-### 4. Outlier Detection
-
-```python
+# Step 7: Identify patterns
 patterns = analyzer.identify_patterns()
-outliers = patterns['outliers']
+
+# Step 8: Statistical tests
+chi_square_results = analyzer.perform_chi_square_test(correction_method='fdr_bh')
+
+# Step 9: Train predictive models
+lr_results = analyzer.train_logistic_regression(
+    use_original_features=True,  # Interpretable coefficients
+    cv_folds=5
+)
+
+linear_results = analyzer.train_linear_regression(
+    target_feature='revenue',
+    regularization='ridge',  # or 'lasso', 'elasticnet'
+    check_multicollinearity=True
+)
+
+# Step 10: Generate insights
+insights = analyzer.generate_llm_insights(cluster_analysis, patterns)
+
+# Step 11: Visualize
+analyzer.visualize_results()
+
+# Step 12: Generate comprehensive report
+report = analyzer.generate_report(cluster_analysis, patterns, insights)
+
+# Or run complete pipeline
+results = analyzer.run_full_analysis(n_clusters=None)
 ```
 
-## Troubleshooting
+## 📊 Output Files
+
+### Data Processing
+- `champions_group_processed.xlsx` - Processed dataset with derived metrics
+
+### Clustering Analysis
+- `clustering_analysis_report.txt` - Comprehensive text report
+- Various visualization PNG files (if generated)
+
+### Company Intelligence
+- `company_intelligence_report.txt` - Comprehensive analysis report
+- `optimal_clusters.png` - Cluster validation metrics (Silhouette, Davies-Bouldin, Calinski-Harabasz)
+- `pca_clusters.png` - PCA visualization
+- `feature_comparison.png` - Feature comparison across clusters
+- `interactive_clusters.html` - Interactive 3D visualization
+- `companies_with_segments.csv` - Data with cluster labels (if exported)
+
+## 🔬 Technical Details
+
+### Algorithms & Methods
+
+**Clustering:**
+- K-Means (default)
+- DBSCAN (optional)
+- Multi-metric validation (Silhouette, Davies-Bouldin, Calinski-Harabasz)
+
+**Dimensionality Reduction:**
+- PCA (Principal Component Analysis)
+- TruncatedSVD (Singular Value Decomposition)
+- t-SNE (perplexity scaled with dataset size)
+- UMAP (optional)
+
+**Regression:**
+- Logistic Regression (multinomial, interpretable features)
+- Linear Regression with regularization (Ridge/Lasso/ElasticNet)
+
+**Statistical Tests:**
+- Chi-Square Test (with assumption validation)
+- Multiple testing correction (Bonferroni/FDR)
+
+**Feature Engineering:**
+- TF-IDF vectorization (text features)
+- Business indicator calculation
+- Outlier winsorization (IQR method)
+
+### Statistical Improvements
+
+The system implements best practices for statistical analysis:
+
+1. **No Data Leakage**: Proper train/test split before scaling
+2. **Outlier Handling**: Winsorization (capping) instead of removal
+3. **Multicollinearity Detection**: VIF calculation before regression
+4. **Regularization**: Ridge/Lasso to handle correlated features
+5. **Cross-Validation**: 5-fold CV for stable metrics
+6. **Assumption Validation**: Chi-square expected frequency checks
+7. **Multiple Testing Correction**: Prevents false discoveries
+8. **Interpretable Models**: Original features for logistic regression
+
+### Business Indicators
+
+**Automatically Calculated:**
+- Market Value/Revenue Ratio (growth vs. value)
+- IT Investment Intensity (tech-forward vs. traditional)
+- Single-Site Concentration (geographic strategy)
+- Workforce Technology Ratio (knowledge economy)
+- Technology Sophistication Index (IT maturity)
+- Growth Potential Index (composite growth score)
+- Maturity Stage (configurable thresholds)
+- Revenue/Employee Scale (quantile-based)
+
+## 📈 Data Format
+
+The system expects data in Excel (.xlsx, .xls) or CSV format with:
+
+**Required Numeric Columns:**
+- Revenue (USD)
+- Market Value (USD)
+- Employee Total
+- Employee Single Sites
+- IT Budget / IT Spend
+- Technology Infrastructure (PCs, Servers, Storage, Routers, Laptops, Desktops)
+- Year Founded
+
+**Optional Text Columns:**
+- SIC Description
+- NAICS Description
+- NACE Rev 2 Description
+
+**Optional Categorical Columns:**
+- Entity Type
+- Ownership Type
+- Manufacturing Status
+- Import/Export Status
+- Franchise Status
+
+The system uses pattern matching to find columns, so exact names aren't required.
+
+## 🎯 Use Cases
+
+### Sales Intelligence
+- Segment prospects by characteristics
+- Prioritize high-value segments
+- Understand customer profiles
+- Predict segment membership for new leads
+
+### Risk Assessment
+- Identify risk patterns by segment
+- Detect anomalies and outliers
+- Benchmark against similar companies
+- Assess technology dependency
+
+### Market Research
+- Understand industry structure
+- Identify market segments
+- Analyze competitive landscape
+- Growth potential analysis
+
+### Strategic Planning
+- Identify growth opportunities
+- Understand operational differences
+- Support M&A analysis
+- Technology investment planning
+
+## ⚙️ Configuration
+
+### Clustering Parameters
+```python
+# Customize cluster selection
+optimal_k = analyzer.determine_optimal_clusters(
+    max_k=10,
+    practical_threshold=0.75  # Adjust threshold for business practicality
+)
+```
+
+### Regression Parameters
+```python
+# Linear regression with regularization
+linear_results = analyzer.train_linear_regression(
+    target_feature='revenue',
+    regularization='ridge',  # 'ridge', 'lasso', 'elasticnet', or 'none'
+    alpha=1.0,  # Regularization strength
+    check_multicollinearity=True
+)
+```
+
+### Business Indicators
+```python
+# Calculate additional indicators
+analyzer.calculate_business_indicators()
+
+# Indicators are automatically included in clustering if enabled
+analyzer.preprocess_data(include_key_indicators_in_clustering=True)
+```
+
+## 🐛 Troubleshooting
 
 ### Common Issues
 
-1. **File Not Found Error**
-   - Ensure the data file path is correct
-   - Use absolute path if relative path doesn't work
+1. **ModuleNotFoundError**
+   - Install missing packages: `pip install -r requirements.txt`
+   - For advanced features: `pip install statsmodels`
 
-2. **Missing Columns**
-   - Check column names match expected patterns
-   - System will warn about missing columns
+2. **Memory Issues**
+   - Reduce number of features
+   - Use sampling for initial exploration
+   - Increase system memory
 
-3. **Memory Issues**
-   - Reduce `max_features` in TF-IDF
-   - Use smaller `max_k` for cluster determination
-   - Process data in batches
+3. **LLM Insights Not Working**
+   - Check API key is set correctly
+   - Verify internet connection
+   - System falls back to rule-based insights automatically
 
-4. **API Key Issues**
-   - Verify API key is set in environment variables
-   - Check API key format (OpenAI keys start with 'sk-')
-   - System will use rule-based insights if LLM unavailable
+4. **Poor Clustering Results**
+   - Review data quality
+   - Try different number of clusters
+   - Check for data normalization issues
+   - Verify business indicators are meaningful
 
-## Performance Considerations
+5. **Statistical Test Warnings**
+   - Chi-square assumption violations: Consider combining categories
+   - High VIF scores: Use Ridge/Lasso regression
+   - Multiple testing: Results are automatically corrected
 
-- **Large Datasets**: Use `exclude_cols` to reduce feature space
-- **Clustering**: Balanced clustering may take longer but provides better distribution
-- **TF-IDF**: Reduce `max_features` for faster processing
-- **Dimensionality Reduction**: t-SNE can be slow for large datasets
+## 📚 Code Structure
 
-## License
+```
+company_intelligence.py
+├── CompanyIntelligence (Main Class)
+    ├── Data Loading & Exploration
+    ├── Preprocessing (with business indicators)
+    ├── Clustering (multi-metric validation)
+    ├── Statistical Analysis (Chi-square, VIF)
+    ├── Machine Learning (Logistic/Linear Regression)
+    ├── Dimensionality Reduction (PCA, t-SNE, UMAP)
+    ├── Visualization
+    └── Report Generation
 
-This project is part of a Datathon competition submission.
+clustering_analysis.py
+└── LatentSparseClustering (4-Phase Workflow)
 
-## Contributing
+process_champions_data.py
+└── Data Processing & Metric Calculation
+```
 
-This is a competition project. For questions or issues, please refer to the competition guidelines.
+## 🔄 Workflow
 
-## Acknowledgments
+1. **Data Loading** → Load Excel/CSV data
+2. **Data Exploration** → Understand data structure
+3. **Preprocessing** → Feature engineering, outlier handling, scaling
+4. **Business Indicators** → Calculate derived metrics
+5. **Clustering** → Multi-metric validation, optimal K selection
+6. **Analysis** → Cluster characterization, comparison
+7. **Statistical Tests** → Chi-square with corrections
+8. **Predictive Modeling** → Logistic/Linear regression
+9. **Visualization** → Charts and interactive plots
+10. **Reporting** → Comprehensive text report
 
-- Built with scikit-learn, pandas, and numpy
-- Visualization powered by matplotlib, seaborn, and plotly
-- Optional LLM insights via OpenAI or DeepSeek APIs
+## 📝 License
+
+This project is provided as-is for the Datathon 2026 competition.
+
+## 🤝 Contributing
+
+For questions or issues, please refer to the project documentation or contact the development team.
+
+---
+
+**Last Updated**: January 2026  
+**Version**: 2.0 (with statistical improvements and business indicators)

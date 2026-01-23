@@ -8,12 +8,28 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.decomposition import PCA, TruncatedSVD
-from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, Lasso, ElasticNet
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score, KFold
 from sklearn.metrics import silhouette_score, classification_report, confusion_matrix, accuracy_score
+from sklearn.metrics import davies_bouldin_score, calinski_harabasz_score
+try:
+    from sklearn.impute import KNNImputer
+    HAS_KNN_IMPUTER = True
+except ImportError:
+    HAS_KNN_IMPUTER = False
+
 from scipy.stats import chi2_contingency
+
+# Optional imports for advanced statistical tests
+try:
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+    from statsmodels.stats.multitest import multipletests
+    HAS_STATSMODELS = True
+except ImportError:
+    HAS_STATSMODELS = False
+    print("Warning: statsmodels not available. Multiple testing correction will use scipy only.")
 from scipy import sparse
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -265,14 +281,19 @@ class CompanyIntelligence:
         
         return self.df
     
-    def remove_outliers_iqr(self, df: pd.DataFrame, columns: List[str], multiplier: float = 1.5) -> Tuple[pd.DataFrame, Dict]:
+    def remove_outliers_iqr(self, df: pd.DataFrame, columns: List[str], multiplier: float = 1.5, 
+                           method: str = 'cap') -> Tuple[pd.DataFrame, Dict]:
         """
-        Remove outliers using the Interquartile Range (IQR) method.
+        Handle outliers using the Interquartile Range (IQR) method.
+        
+        FIXED: Changed from union-based removal (removes row if ANY feature is outlier)
+        to per-feature capping (winsorization) to preserve valuable data points.
 
         Args:
             df: DataFrame to clean
             columns: List of column names to check for outliers
             multiplier: IQR multiplier (default 1.5 for standard outlier detection)
+            method: 'cap' (winsorize) or 'remove' (drop rows) - default 'cap' to preserve data
 
         Returns:
             Tuple of (cleaned_df, outlier_report)
@@ -284,11 +305,12 @@ class CompanyIntelligence:
             'outliers_by_column': {},
             'total_rows_removed': 0,
             'total_rows_after': 0,
-            'percentage_removed': 0
+            'percentage_removed': 0,
+            'method': method
         }
 
-        # Track rows to remove (union of all outliers across columns)
-        outlier_indices = set()
+        # Track outliers per column (for reporting)
+        outlier_indices_per_col = {}
 
         for col in columns:
             if col not in df.columns:
@@ -310,7 +332,17 @@ class CompanyIntelligence:
 
             # Find outlier indices
             col_outliers = df[(df[col] < lower_bound) | (df[col] > upper_bound)].index
-            outlier_indices.update(col_outliers)
+            outlier_indices_per_col[col] = col_outliers
+
+            # FIXED: Per-feature handling instead of union-based removal
+            if method == 'cap':
+                # Winsorize: Cap outliers at bounds (preserves data)
+                df_clean.loc[df_clean[col] < lower_bound, col] = lower_bound
+                df_clean.loc[df_clean[col] > upper_bound, col] = upper_bound
+                rows_affected = len(col_outliers)
+            else:
+                # Old method: Mark for removal (union-based)
+                rows_affected = len(col_outliers)
 
             # Store report data
             outlier_report['columns_processed'].append(col)
@@ -321,21 +353,35 @@ class CompanyIntelligence:
                 'upper_bound': upper_bound,
                 'Q1': Q1,
                 'Q3': Q3,
-                'IQR': IQR
+                'IQR': IQR,
+                'rows_affected': rows_affected
             }
 
-        # Remove all outlier rows
-        if outlier_indices:
-            df_clean = df_clean.drop(index=list(outlier_indices))
-            outlier_report['total_rows_removed'] = len(outlier_indices)
-            outlier_report['total_rows_after'] = len(df_clean)
-            outlier_report['percentage_removed'] = (len(outlier_indices) / len(df)) * 100
+        # Only remove rows if method is 'remove' (union-based - not recommended)
+        if method == 'remove':
+            outlier_indices = set()
+            for col, indices in outlier_indices_per_col.items():
+                outlier_indices.update(indices)
+            
+            if outlier_indices:
+                df_clean = df_clean.drop(index=list(outlier_indices))
+                outlier_report['total_rows_removed'] = len(outlier_indices)
+                outlier_report['total_rows_after'] = len(df_clean)
+                outlier_report['percentage_removed'] = (len(outlier_indices) / len(df)) * 100
+            else:
+                outlier_report['total_rows_after'] = len(df)
         else:
-            outlier_report['total_rows_after'] = len(df)
+            # Method 'cap': No rows removed, only values capped
+            outlier_report['total_rows_after'] = len(df_clean)
+            outlier_report['total_rows_removed'] = 0
+            outlier_report['percentage_removed'] = 0
+            total_outliers = sum(len(indices) for indices in outlier_indices_per_col.values())
+            print(f"  → Capped {total_outliers} outlier values (preserved all {len(df_clean)} rows)")
 
         return df_clean, outlier_report
 
-    def preprocess_data(self, exclude_cols: List[str] = None):
+    def preprocess_data(self, exclude_cols: List[str] = None, calculate_indicators: bool = True, 
+                       include_key_indicators_in_clustering: bool = True):
         """
         Preprocess data for clustering - COMPREHENSIVE FEATURE SET:
 
@@ -343,6 +389,7 @@ class CompanyIntelligence:
         - Core: Revenue, Market Value, Employee Total, Employee Single Sites
         - Technology: IT Budget, IT Spend, PCs, Servers, Storage, Routers, Laptops, Desktops
         - Maturity: Company Age (derived from Year Founded)
+        - Key Business Indicators: Market Value/Revenue Ratio, IT Investment Intensity
 
         Text Features (TF-IDF):
         - SIC Description, NAICS Description, NACE Rev 2 Description
@@ -354,12 +401,16 @@ class CompanyIntelligence:
         1. Feature engineering (create company age)
         2. Missing value imputation (median)
         3. Outlier removal (IQR method)
-        4. Feature scaling (StandardScaler)
-        5. TF-IDF vectorization for text
-        6. Feature combination
+        4. Calculate key business indicators (Market Value/Revenue, IT Investment Intensity)
+        5. Feature scaling (StandardScaler)
+        6. TF-IDF vectorization for text
+        7. Feature combination
+        8. (Optional) Calculate additional business indicators
 
         Args:
             exclude_cols: List of column names to exclude from analysis (not used in focused mode)
+            calculate_indicators: If True, calculate key business indicators (default: True)
+            include_key_indicators_in_clustering: If True, include Market Value/Revenue and IT Investment Intensity in clustering (default: True)
         """
         print("\n" + "="*50)
         print("DATA PREPROCESSING - COMPREHENSIVE ANALYSIS")
@@ -465,11 +516,21 @@ class CompanyIntelligence:
         # Create company age from year founded
         if 'year_founded' in found_numeric:
             year_col = found_numeric['year_founded']
-            current_year = 2026  # Update this as needed
+            # FIXED: Use dynamic current year instead of hardcoded
+            from datetime import datetime
+            current_year = datetime.now().year
             if year_col in df_processed.columns:
                 # Create age column
                 age_col = 'company_age'
                 df_processed[age_col] = current_year - df_processed[year_col]
+
+                # FIXED: Validate years (check for future years, invalid years)
+                invalid_years = (df_processed[year_col] > current_year) | (df_processed[year_col] < 1800)
+                if invalid_years.sum() > 0:
+                    print(f"  ⚠ Warning: {invalid_years.sum()} companies have invalid years (future or < 1800)")
+                    print(f"     Invalid years will be set to median")
+                    df_processed.loc[invalid_years, year_col] = df_processed[year_col].median()
+                    df_processed[age_col] = current_year - df_processed[year_col]
 
                 # Handle invalid ages (negative or too large)
                 df_processed.loc[df_processed[age_col] < 0, age_col] = 0
@@ -488,15 +549,43 @@ class CompanyIntelligence:
                 # Convert categorical ranges to numeric (e.g., "1 to 10" -> 5)
                 try:
                     def parse_range(val):
+                        """FIXED: Handle multiple range formats: '1 to 10', '1-10', '1~10', '<10', '>100'"""
                         if pd.isna(val):
                             return np.nan
                         val_str = str(val).strip()
+                        
+                        # Handle "X to Y" format
                         if ' to ' in val_str.lower():
                             parts = val_str.lower().split(' to ')
                             try:
                                 return (float(parts[0]) + float(parts[1])) / 2
                             except:
                                 return np.nan
+                        # Handle "X-Y" or "X~Y" format
+                        elif '-' in val_str and not val_str.startswith('-'):
+                            parts = val_str.split('-')
+                            try:
+                                return (float(parts[0]) + float(parts[1])) / 2
+                            except:
+                                return np.nan
+                        elif '~' in val_str:
+                            parts = val_str.split('~')
+                            try:
+                                return (float(parts[0]) + float(parts[1])) / 2
+                            except:
+                                return np.nan
+                        # Handle inequalities "<X" or ">X"
+                        elif val_str.startswith('<'):
+                            try:
+                                return float(val_str[1:]) * 0.5  # Use half of upper bound
+                            except:
+                                return np.nan
+                        elif val_str.startswith('>'):
+                            try:
+                                return float(val_str[1:]) * 1.5  # Use 1.5x of lower bound
+                            except:
+                                return np.nan
+                        # Handle plain numbers
                         elif val_str.replace('.', '').replace('-', '').isdigit():
                             return float(val_str)
                         else:
@@ -521,7 +610,10 @@ class CompanyIntelligence:
         numeric_cols_to_clean = [col for col in found_numeric.values() if col in df_processed.columns]
 
         if numeric_cols_to_clean:
-            df_processed, outlier_report = self.remove_outliers_iqr(df_processed, numeric_cols_to_clean)
+            # FIXED: Use 'cap' method to preserve data instead of removing rows
+            df_processed, outlier_report = self.remove_outliers_iqr(
+                df_processed, numeric_cols_to_clean, method='cap'
+            )
             self.outlier_report = outlier_report
 
             # Print detailed outlier report
@@ -565,9 +657,63 @@ class CompanyIntelligence:
         if len(feature_cols) == 0:
             raise ValueError("No valid numeric features found after preprocessing. Check your data.")
 
+        # Calculate key business indicators BEFORE scaling (if requested)
+        key_indicators = []
+        if calculate_indicators:
+            # Calculate Market Value to Revenue Ratio
+            revenue_col = found_numeric.get('revenue')
+            market_val_col = found_numeric.get('market_value')
+            if revenue_col and market_val_col and revenue_col in df_processed.columns and market_val_col in df_processed.columns:
+                df_processed['market_value_to_revenue_ratio'] = np.where(
+                    df_processed[revenue_col] > 0,
+                    df_processed[market_val_col] / df_processed[revenue_col],
+                    np.nan
+                )
+                key_indicators.append('market_value_to_revenue_ratio')
+                print("✓ Calculated Market Value to Revenue Ratio (for growth vs. value segmentation)")
+            
+            # Calculate IT Investment Intensity
+            it_budget_col = found_numeric.get('it_budget')
+            it_spend_col = found_numeric.get('it_spend')
+            if revenue_col and revenue_col in df_processed.columns:
+                it_total = None
+                if it_budget_col and it_budget_col in df_processed.columns:
+                    it_total = df_processed[it_budget_col].fillna(0)
+                if it_spend_col and it_spend_col in df_processed.columns:
+                    if it_total is not None:
+                        it_total = it_total + df_processed[it_spend_col].fillna(0)
+                    else:
+                        it_total = df_processed[it_spend_col].fillna(0)
+                
+                if it_total is not None:
+                    df_processed['it_investment_intensity'] = np.where(
+                        df_processed[revenue_col] > 0,
+                        it_total / df_processed[revenue_col],
+                        np.nan
+                    )
+                    key_indicators.append('it_investment_intensity')
+                    print("✓ Calculated IT Investment Intensity (for tech-forward vs. traditional segmentation)")
+        
+        # Add key indicators to feature list if requested
+        if include_key_indicators_in_clustering and key_indicators:
+            for indicator in key_indicators:
+                if indicator in df_processed.columns and indicator not in feature_cols:
+                    # Check if indicator has variance
+                    if df_processed[indicator].std() > 0:
+                        feature_cols.append(indicator)
+                        print(f"  → Added '{indicator}' to clustering features")
+                    else:
+                        print(f"  ⚠ Skipped '{indicator}' (zero variance)")
+        
         # Store numeric features (without duplicates)
         self.feature_names = feature_cols.copy()
         self.df_processed = df_processed[feature_cols].copy()
+        
+        # Handle missing values in key indicators before scaling
+        for col in key_indicators:
+            if col in self.df_processed.columns:
+                fill_value = self.df_processed[col].median() if not pd.isna(self.df_processed[col].median()) else 0
+                self.df_processed[col].fillna(fill_value, inplace=True)
         
         # Scale numeric features
         self.df_processed_scaled = pd.DataFrame(
@@ -577,6 +723,8 @@ class CompanyIntelligence:
         )
         
         print(f"\n✓ Processed {len(feature_cols)} numeric features for analysis")
+        if key_indicators:
+            print(f"  Key Business Indicators included: {', '.join([k for k in key_indicators if k in feature_cols])}")
         print(f"  Numeric Features: {feature_cols}")
         
         # Apply TF-IDF to text columns if available
@@ -593,28 +741,310 @@ class CompanyIntelligence:
                 ], axis=1)
                 print(f"  Combined with {self.tfidf_features.shape[1]} TF-IDF features")
         
+        # Optionally calculate additional business indicators
+        if calculate_indicators:
+            self.calculate_business_indicators()
+        
         return self.df_processed_scaled
     
-    def determine_optimal_clusters(self, max_k: int = 10):
+    def calculate_business_indicators(self):
         """
-        Determine optimal number of clusters using enhanced business-focused method
-        SEGMENTATION: Balanced Silhouette Score + Business Practicality
+        Calculate additional business indicators from existing features.
+        These metrics provide deeper insights for segmentation and analysis.
+        
+        Returns:
+            DataFrame with additional business indicator columns
+        """
+        print("\n" + "="*50)
+        print("CALCULATING BUSINESS INDICATORS")
+        print("="*50)
+        
+        if self.df is None:
+            print("Error: Data must be loaded first!")
+            return None
+        
+        df_indicators = self.df.copy()
+        indicators_added = []
+        
+        # Get column references from found_numeric
+        if not hasattr(self, 'found_numeric') or not self.found_numeric:
+            print("Warning: Numeric columns not found. Running preprocessing first...")
+            self.preprocess_data()
+        
+        # Helper function to safely get column value
+        def get_col(key):
+            if key in self.found_numeric and self.found_numeric[key] in df_indicators.columns:
+                return df_indicators[self.found_numeric[key]]
+            return None
+        
+        # 1. Market Value to Revenue Ratio (Price-to-Sales)
+        revenue_col = get_col('revenue')
+        market_val_col = get_col('market_value')
+        if revenue_col is not None and market_val_col is not None:
+            df_indicators['market_value_to_revenue_ratio'] = np.where(
+                revenue_col > 0,
+                market_val_col / revenue_col,
+                np.nan
+            )
+            indicators_added.append('market_value_to_revenue_ratio')
+            print("✓ Market Value to Revenue Ratio")
+        
+        # 2. IT Investment Intensity
+        it_budget_col = get_col('it_budget')
+        it_spend_col = get_col('it_spend')
+        if revenue_col is not None:
+            # FIXED: Use median imputation instead of fillna(0) to avoid bias
+            it_total = None
+            if it_budget_col is not None and it_spend_col is not None:
+                # Use median of non-null values for imputation
+                budget_median = it_budget_col.median() if not it_budget_col.isna().all() else 0
+                spend_median = it_spend_col.median() if not it_spend_col.isna().all() else 0
+                it_total = it_budget_col.fillna(budget_median) + it_spend_col.fillna(spend_median)
+            elif it_budget_col is not None:
+                budget_median = it_budget_col.median() if not it_budget_col.isna().all() else 0
+                it_total = it_budget_col.fillna(budget_median)
+            elif it_spend_col is not None:
+                spend_median = it_spend_col.median() if not it_spend_col.isna().all() else 0
+                it_total = it_spend_col.fillna(spend_median)
+            
+            if it_total is not None:
+                df_indicators['it_investment_intensity'] = np.where(
+                    revenue_col > 0,
+                    it_total / revenue_col,
+                    np.nan
+                )
+                indicators_added.append('it_investment_intensity')
+                print("✓ IT Investment Intensity")
+        
+        # 3. Single-Site Concentration Ratio
+        emp_total_col = get_col('employee_total')
+        emp_single_col = get_col('employee_single_sites')
+        if emp_total_col is not None and emp_single_col is not None:
+            df_indicators['single_site_concentration'] = np.where(
+                emp_total_col > 0,
+                emp_single_col / emp_total_col,
+                np.nan
+            )
+            indicators_added.append('single_site_concentration')
+            print("✓ Single-Site Concentration Ratio")
+        
+        # 4. Workforce Technology Ratio
+        num_pcs_col = get_col('num_pcs')
+        num_laptops_col = get_col('num_laptops')
+        if emp_total_col is not None:
+            devices_total = None
+            if num_pcs_col is not None and num_laptops_col is not None:
+                devices_total = num_pcs_col.fillna(0) + num_laptops_col.fillna(0)
+            elif num_pcs_col is not None:
+                devices_total = num_pcs_col.fillna(0)
+            elif num_laptops_col is not None:
+                devices_total = num_laptops_col.fillna(0)
+            
+            if devices_total is not None:
+                df_indicators['workforce_tech_ratio'] = np.where(
+                    emp_total_col > 0,
+                    devices_total / emp_total_col,
+                    np.nan
+                )
+                indicators_added.append('workforce_tech_ratio')
+                print("✓ Workforce Technology Ratio")
+        
+        # 5. Technology Sophistication Index
+        num_servers_col = get_col('num_servers')
+        num_storage_col = get_col('num_storage')
+        num_routers_col = get_col('num_routers')
+        if emp_total_col is not None:
+            tech_score = pd.Series(0.0, index=df_indicators.index)
+            
+            if num_servers_col is not None:
+                tech_score += num_servers_col.fillna(0) * 3
+            if num_storage_col is not None:
+                tech_score += num_storage_col.fillna(0) * 2
+            if num_routers_col is not None:
+                tech_score += num_routers_col.fillna(0) * 1
+            if num_pcs_col is not None:
+                tech_score += num_pcs_col.fillna(0) * 0.5
+            if num_laptops_col is not None:
+                tech_score += num_laptops_col.fillna(0) * 0.5
+            
+            df_indicators['tech_sophistication_index'] = np.where(
+                emp_total_col > 0,
+                tech_score / emp_total_col,
+                np.nan
+            )
+            indicators_added.append('tech_sophistication_index')
+            print("✓ Technology Sophistication Index")
+        
+        # 6. Mobile vs. Desktop Ratio
+        num_desktops_col = get_col('num_desktops')
+        if num_laptops_col is not None and num_desktops_col is not None:
+            total_devices = num_laptops_col.fillna(0) + num_desktops_col.fillna(0)
+            df_indicators['mobile_ratio'] = np.where(
+                total_devices > 0,
+                num_laptops_col.fillna(0) / total_devices,
+                np.nan
+            )
+            indicators_added.append('mobile_ratio')
+            print("✓ Mobile vs. Desktop Ratio")
+        
+        # 7. Growth Potential Index (composite)
+        if revenue_col is not None and emp_total_col is not None and market_val_col is not None:
+            revenue_per_emp = np.where(emp_total_col > 0, revenue_col / emp_total_col, 0)
+            market_to_rev = np.where(revenue_col > 0, market_val_col / revenue_col, 0)
+            it_intensity = df_indicators.get('it_investment_intensity', pd.Series(0, index=df_indicators.index))
+            
+            # Normalize components (0-1 scale) before combining
+            revenue_per_emp_norm = (revenue_per_emp - np.nanmin(revenue_per_emp)) / (np.nanmax(revenue_per_emp) - np.nanmin(revenue_per_emp) + 1e-10)
+            market_to_rev_norm = (market_to_rev - np.nanmin(market_to_rev)) / (np.nanmax(market_to_rev) - np.nanmin(market_to_rev) + 1e-10)
+            it_intensity_norm = (it_intensity - np.nanmin(it_intensity)) / (np.nanmax(it_intensity) - np.nanmin(it_intensity) + 1e-10)
+            
+            # FIXED: Documented weights rationale
+            # Weights: 0.4 revenue/emp (productivity), 0.3 market/revenue (growth expectations), 0.3 IT intensity (innovation)
+            # Rationale: Productivity is primary driver (40%), market expectations and innovation equally important (30% each)
+            # Alternative: Use PCA to derive data-driven weights if preferred
+            growth_weights = {
+                'revenue_per_emp': 0.4,  # Labor productivity - primary growth driver
+                'market_to_revenue': 0.3,  # Market expectations - growth potential indicator
+                'it_intensity': 0.3  # Innovation investment - technology-driven growth
+            }
+            
+            df_indicators['growth_potential_index'] = (
+                revenue_per_emp_norm * growth_weights['revenue_per_emp'] +
+                market_to_rev_norm * growth_weights['market_to_revenue'] +
+                it_intensity_norm * growth_weights['it_intensity']
+            )
+            indicators_added.append('growth_potential_index')
+            print("✓ Growth Potential Index")
+        
+        # 8. Company Maturity Stage (categorical)
+        # FIXED: Made cutoffs configurable (can be customized per industry)
+        if 'company_age' in df_indicators.columns:
+            # Default thresholds (can be customized)
+            startup_threshold = 5
+            growth_threshold = 10
+            mature_threshold = 20
+            
+            def categorize_maturity(age):
+                if pd.isna(age) or age < 0:
+                    return "Unknown"
+                elif age < startup_threshold:
+                    return "Startup"
+                elif age < growth_threshold:
+                    return "Growth"
+                elif age < mature_threshold:
+                    return "Mature"
+                else:
+                    return "Established"
+            
+            df_indicators['maturity_stage'] = df_indicators['company_age'].apply(categorize_maturity)
+            indicators_added.append('maturity_stage')
+            print(f"✓ Company Maturity Stage (thresholds: {startup_threshold}/{growth_threshold}/{mature_threshold} years)")
+        
+        # 9. Revenue Scale Category
+        # FIXED: Use quantiles instead of fixed boundaries for data-driven segmentation
+        if revenue_col is not None:
+            valid_revenue = revenue_col[revenue_col > 0].dropna()
+            if len(valid_revenue) > 0:
+                # Use quantiles for data-driven boundaries
+                q20 = valid_revenue.quantile(0.20)
+                q40 = valid_revenue.quantile(0.40)
+                q60 = valid_revenue.quantile(0.60)
+                q80 = valid_revenue.quantile(0.80)
+                
+                def categorize_revenue_scale(rev):
+                    if pd.isna(rev) or rev <= 0:
+                        return "Unknown"
+                    elif rev < q20:
+                        return "Micro"
+                    elif rev < q40:
+                        return "Small"
+                    elif rev < q60:
+                        return "Mid-Market"
+                    elif rev < q80:
+                        return "Upper Mid-Market"
+                    else:
+                        return "Enterprise"
+                
+                df_indicators['revenue_scale'] = revenue_col.apply(categorize_revenue_scale)
+                indicators_added.append('revenue_scale')
+                print(f"✓ Revenue Scale Category (quantile-based: {q20:.0f}/{q40:.0f}/{q60:.0f}/{q80:.0f})")
+            else:
+                # Fallback to fixed boundaries if no valid data
+                def categorize_revenue_scale(rev):
+                    if pd.isna(rev) or rev <= 0:
+                        return "Unknown"
+                    elif rev < 1_000_000:
+                        return "Micro"
+                    elif rev < 10_000_000:
+                        return "Small"
+                    elif rev < 100_000_000:
+                        return "Mid-Market"
+                    elif rev < 1_000_000_000:
+                        return "Upper Mid-Market"
+                    else:
+                        return "Enterprise"
+                
+                df_indicators['revenue_scale'] = revenue_col.apply(categorize_revenue_scale)
+                indicators_added.append('revenue_scale')
+                print("✓ Revenue Scale Category (using fixed boundaries - no valid data for quantiles)")
+        
+        # 10. Employee Scale Category
+        if emp_total_col is not None:
+            def categorize_employee_scale(emp):
+                if pd.isna(emp) or emp <= 0:
+                    return "Unknown"
+                elif emp < 10:
+                    return "Micro"
+                elif emp < 50:
+                    return "Small"
+                elif emp < 250:
+                    return "Mid-Market"
+                elif emp < 1000:
+                    return "Upper Mid-Market"
+                else:
+                    return "Enterprise"
+            
+            df_indicators['employee_scale'] = emp_total_col.apply(categorize_employee_scale)
+            indicators_added.append('employee_scale')
+            print("✓ Employee Scale Category")
+        
+        # Update the main dataframe
+        self.df = df_indicators
+        
+        print(f"\n✓ Calculated {len(indicators_added)} business indicators")
+        print(f"  Indicators: {', '.join(indicators_added)}")
+        
+        return df_indicators
+    
+    def determine_optimal_clusters(self, max_k: int = 10, practical_threshold: float = 0.70):
+        """
+        Determine optimal number of clusters using enhanced business-focused method with
+        multiple validation metrics.
+        
+        FIXED: Added Davies-Bouldin and Calinski-Harabasz indices to complement Silhouette Score.
+        FIXED: Made practical_threshold configurable (was hardcoded 0.70).
 
         The algorithm considers:
-        1. Silhouette scores (cluster quality)
-        2. Business practicality (K=2 is too simplistic, K>9 is too complex)
-        3. Preference for K=5-7 range (standard market segmentation)
+        1. Silhouette scores (cluster quality) - higher is better
+        2. Davies-Bouldin index (cluster separation) - lower is better
+        3. Calinski-Harabasz index (variance ratio) - higher is better
+        4. Business practicality (K=2 is too simplistic, K>9 is too complex)
+        5. Preference for K=5-7 range (standard market segmentation)
 
         Args:
             max_k: Maximum number of clusters to test
+            practical_threshold: Threshold for preferring practical K (0.70 = 70% of max score)
         """
         print("\n" + "="*50)
         print("SEGMENTATION: DETERMINING OPTIMAL CLUSTERS")
-        print("Method: Enhanced Business-Focused Clustering")
+        print("Method: Multi-Metric Business-Focused Clustering")
         print("="*50)
 
         inertias = []
         silhouette_scores = []
+        davies_bouldin_scores = []
+        calinski_harabasz_scores = []
+        
         max_possible_k = min(max_k + 1, len(self.df_processed_scaled) // 2, len(self.df_processed_scaled) - 1)
         if max_possible_k < 2:
             print("Warning: Not enough data points for clustering. Using k=2.")
@@ -626,15 +1056,39 @@ class CompanyIntelligence:
             kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
             labels = kmeans.fit_predict(self.df_processed_scaled)
             inertias.append(kmeans.inertia_)
-            silhouette_scores.append(silhouette_score(self.df_processed_scaled, labels))
-            print(f"K={k}: Inertia={kmeans.inertia_:.2f}, Silhouette={silhouette_scores[-1]:.3f}")
+            
+            # Calculate multiple validation metrics
+            sil_score = silhouette_score(self.df_processed_scaled, labels)
+            silhouette_scores.append(sil_score)
+            
+            db_score = davies_bouldin_score(self.df_processed_scaled, labels)
+            davies_bouldin_scores.append(db_score)
+            
+            ch_score = calinski_harabasz_score(self.df_processed_scaled, labels)
+            calinski_harabasz_scores.append(ch_score)
+            
+            print(f"K={k}: Silhouette={sil_score:.3f}, Davies-Bouldin={db_score:.3f}, Calinski-Harabasz={ch_score:.2f}")
 
-        # Enhanced optimal k selection logic
-        # Prioritize K=5-7 if silhouette scores are reasonable (>0.30)
-        # This provides actionable business segmentation instead of oversimplified K=2
-
+        # Enhanced optimal k selection logic with multiple metrics
         best_k_by_silhouette = k_range[np.argmax(silhouette_scores)]
         max_silhouette = max(silhouette_scores)
+        
+        # Normalize Davies-Bouldin (lower is better, so invert)
+        min_db = min(davies_bouldin_scores)
+        max_db = max(davies_bouldin_scores)
+        normalized_db = [(max_db - db) / (max_db - min_db + 1e-10) for db in davies_bouldin_scores]
+        
+        # Normalize Calinski-Harabasz (higher is better)
+        min_ch = min(calinski_harabasz_scores)
+        max_ch = max(calinski_harabasz_scores)
+        normalized_ch = [(ch - min_ch) / (max_ch - min_ch + 1e-10) for ch in calinski_harabasz_scores]
+        
+        # Combined score (weighted average of normalized metrics)
+        combined_scores = [
+            0.4 * sil + 0.3 * db_norm + 0.3 * ch_norm
+            for sil, db_norm, ch_norm in zip(silhouette_scores, normalized_db, normalized_ch)
+        ]
+        best_k_by_combined = k_range[np.argmax(combined_scores)]
 
         # Look for best K in the practical range (4-8)
         practical_range = [k for k in k_range if 4 <= k <= 8]
@@ -642,52 +1096,74 @@ class CompanyIntelligence:
             practical_scores = [(k, silhouette_scores[k-2]) for k in practical_range]
             best_practical = max(practical_scores, key=lambda x: x[1])
 
-            # If practical K has reasonable score (within 15% of max), prefer it
-            if best_practical[1] >= max_silhouette * 0.70:
+            # FIXED: Use configurable threshold instead of hardcoded 0.70
+            if best_practical[1] >= max_silhouette * practical_threshold:
                 optimal_k = best_practical[0]
                 optimal_silhouette = best_practical[1]
                 print(f"\nOptimal number of clusters: {optimal_k} (business-optimized)")
                 print(f"Silhouette Score: {optimal_silhouette:.4f}")
+                print(f"Davies-Bouldin: {davies_bouldin_scores[optimal_k-2]:.3f} (lower is better)")
+                print(f"Calinski-Harabasz: {calinski_harabasz_scores[optimal_k-2]:.2f} (higher is better)")
                 print(f"Note: K={best_k_by_silhouette} has highest silhouette ({max_silhouette:.4f}),")
                 print(f"      but K={optimal_k} provides better business segmentation")
             else:
-                optimal_k = best_k_by_silhouette
-                optimal_silhouette = max_silhouette
-                print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
+                optimal_k = best_k_by_combined
+                optimal_silhouette = silhouette_scores[optimal_k-2]
+                print(f"\nOptimal number of clusters: {optimal_k} (multi-metric)")
                 print(f"Silhouette Score: {optimal_silhouette:.4f}")
+                print(f"Davies-Bouldin: {davies_bouldin_scores[optimal_k-2]:.3f}")
+                print(f"Calinski-Harabasz: {calinski_harabasz_scores[optimal_k-2]:.2f}")
         else:
-            optimal_k = best_k_by_silhouette
-            optimal_silhouette = max_silhouette
-            print(f"\nOptimal number of clusters: {optimal_k} (silhouette-based)")
+            optimal_k = best_k_by_combined
+            optimal_silhouette = silhouette_scores[optimal_k-2]
+            print(f"\nOptimal number of clusters: {optimal_k} (multi-metric)")
             print(f"Silhouette Score: {optimal_silhouette:.4f}")
+            print(f"Davies-Bouldin: {davies_bouldin_scores[optimal_k-2]:.3f}")
+            print(f"Calinski-Harabasz: {calinski_harabasz_scores[optimal_k-2]:.2f}")
         
         # Store segmentation metrics
         self.segmentation_metrics = {
             'optimal_k': optimal_k,
             'optimal_silhouette_score': optimal_silhouette,
             'silhouette_scores': dict(zip(k_range, silhouette_scores)),
+            'davies_bouldin_scores': dict(zip(k_range, davies_bouldin_scores)),
+            'calinski_harabasz_scores': dict(zip(k_range, calinski_harabasz_scores)),
+            'combined_scores': dict(zip(k_range, combined_scores)),
             'inertias': dict(zip(k_range, inertias)),
-            'method': 'Silhouette Score / Elbow Method'
+            'method': 'Multi-Metric (Silhouette + Davies-Bouldin + Calinski-Harabasz)',
+            'practical_threshold': practical_threshold
         }
         
-        # Plot elbow curve
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        # Plot validation metrics
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         
-        ax1.plot(k_range, inertias, 'bo-')
-        ax1.set_xlabel('Number of Clusters (k)')
-        ax1.set_ylabel('Inertia')
-        ax1.set_title('Elbow Method')
-        ax1.grid(True)
+        axes[0, 0].plot(k_range, inertias, 'bo-')
+        axes[0, 0].set_xlabel('Number of Clusters (k)')
+        axes[0, 0].set_ylabel('Inertia')
+        axes[0, 0].set_title('Elbow Method')
+        axes[0, 0].grid(True)
         
-        ax2.plot(k_range, silhouette_scores, 'ro-')
-        ax2.set_xlabel('Number of Clusters (k)')
-        ax2.set_ylabel('Silhouette Score')
-        ax2.set_title('Silhouette Score')
-        ax2.grid(True)
+        axes[0, 1].plot(k_range, silhouette_scores, 'ro-')
+        axes[0, 1].set_xlabel('Number of Clusters (k)')
+        axes[0, 1].set_ylabel('Silhouette Score (higher is better)')
+        axes[0, 1].set_title('Silhouette Score')
+        axes[0, 1].grid(True)
+        
+        axes[1, 0].plot(k_range, davies_bouldin_scores, 'go-')
+        axes[1, 0].set_xlabel('Number of Clusters (k)')
+        axes[1, 0].set_ylabel('Davies-Bouldin Index (lower is better)')
+        axes[1, 0].set_title('Davies-Bouldin Index')
+        axes[1, 0].grid(True)
+        
+        axes[1, 1].plot(k_range, calinski_harabasz_scores, 'mo-')
+        axes[1, 1].set_xlabel('Number of Clusters (k)')
+        axes[1, 1].set_ylabel('Calinski-Harabasz Index (higher is better)')
+        axes[1, 1].set_title('Calinski-Harabasz Index')
+        axes[1, 1].grid(True)
         
         plt.tight_layout()
         plt.savefig('optimal_clusters.png', dpi=300, bbox_inches='tight')
-        print("\nSaved optimal_clusters.png")
+        print("\nSaved optimal_clusters.png (with multiple validation metrics)")
         plt.close()
         
         return optimal_k
@@ -717,12 +1193,34 @@ class CompanyIntelligence:
         
         # Add cluster labels to original dataframe
         self.df['Cluster'] = self.clusters
-        
+
         print(f"\nClustering complete: {n_clusters} clusters identified")
         print(f"Cluster distribution:")
         cluster_counts = pd.Series(self.clusters).value_counts().sort_index()
         print(cluster_counts)
-        
+
+        # FIXED: Check for very small clusters and warn
+        min_cluster_size = max(10, len(self.df) * 0.01)  # At least 10 or 1% of data
+        small_clusters = cluster_counts[cluster_counts < min_cluster_size]
+
+        if len(small_clusters) > 0:
+            print(f"\n⚠ WARNING: {len(small_clusters)} cluster(s) have fewer than {int(min_cluster_size)} companies:")
+            for cluster_id, count in small_clusters.items():
+                pct = (count / len(self.df)) * 100
+                print(f"    Cluster {cluster_id}: {count} companies ({pct:.2f}%)")
+
+            print("\n  These small clusters may represent outliers rather than meaningful segments.")
+            print("  Consider:")
+            print("    - Using fewer clusters (reduce K)")
+            print("    - Removing outliers before clustering")
+            print("    - Merging small clusters with nearest neighbors")
+
+            # Store outlier cluster info for later handling
+            self.small_clusters = small_clusters.index.tolist()
+        else:
+            self.small_clusters = []
+            print(f"\n✓ All clusters have at least {int(min_cluster_size)} companies (good balance)")
+
         return self.clusters
     
     def analyze_clusters(self):
@@ -746,7 +1244,9 @@ class CompanyIntelligence:
         
         for cluster_id in sorted(self.df['Cluster'].unique()):
             cluster_data = self.df[self.df['Cluster'] == cluster_id]
-            cluster_analysis[cluster_id] = {
+            # Convert cluster_id to native Python int for JSON serialization
+            cluster_id_int = int(cluster_id) if hasattr(cluster_id, 'item') else int(cluster_id)
+            cluster_analysis[cluster_id_int] = {
                 'size': len(cluster_data),
                 'percentage': (len(cluster_data) / len(self.df)) * 100,
                 'numeric_stats': {},
@@ -755,15 +1255,15 @@ class CompanyIntelligence:
             
             # Analyze numeric target features
             if numeric_cols:
-                cluster_analysis[cluster_id]['numeric_stats'] = cluster_data[numeric_cols].describe().to_dict()
+                cluster_analysis[cluster_id_int]['numeric_stats'] = cluster_data[numeric_cols].describe().to_dict()
             
             # Analyze categorical features
             for cat_col in categorical_cols:
                 value_counts = cluster_data[cat_col].value_counts(normalize=True)
-                cluster_analysis[cluster_id]['categorical_profiles'][cat_col] = value_counts.to_dict()
+                cluster_analysis[cluster_id_int]['categorical_profiles'][cat_col] = value_counts.to_dict()
             
-            print(f"\nCluster {cluster_id}:")
-            print(f"  Size: {cluster_analysis[cluster_id]['size']} companies ({cluster_analysis[cluster_id]['percentage']:.1f}%)")
+            print(f"\nCluster {cluster_id_int}:")
+            print(f"  Size: {cluster_analysis[cluster_id_int]['size']} companies ({cluster_analysis[cluster_id_int]['percentage']:.1f}%)")
             if numeric_cols:
                 print(f"  Key Metrics:")
                 for col in numeric_cols:
@@ -894,9 +1394,65 @@ class CompanyIntelligence:
                     except Exception:
                         continue
                 
-                patterns['cluster_differences'][cluster_id] = differences
+                # Convert cluster_id to native Python int for JSON serialization
+                cluster_id_int = int(cluster_id) if hasattr(cluster_id, 'item') else int(cluster_id)
+                patterns['cluster_differences'][cluster_id_int] = differences
         
         return patterns
+    
+    def _convert_numpy_types(self, obj):
+        """
+        Recursively convert numpy types to native Python types for JSON serialization
+        Compatible with NumPy 2.0 (np.float_ removed)
+        
+        Args:
+            obj: Object that may contain numpy types
+            
+        Returns:
+            Object with numpy types converted to native Python types
+        """
+        # Check for numpy integer types (NumPy 2.0 compatible)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        
+        # Check for numpy floating types (NumPy 2.0 compatible - np.float_ removed)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        
+        # Check for numpy bool type
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        
+        # Check for specific integer types (fallback for edge cases)
+        if isinstance(obj, (np.int8, np.int16, np.int32, np.int64, 
+                           np.uint8, np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        
+        # Check for specific float types (fallback for edge cases)
+        if isinstance(obj, (np.float16, np.float32, np.float64)):
+            return float(obj)
+        
+        # Check for numpy array
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        
+        # Recursively process dictionaries
+        if isinstance(obj, dict):
+            return {self._convert_numpy_types(k): self._convert_numpy_types(v) for k, v in obj.items()}
+        
+        # Recursively process lists and tuples
+        if isinstance(obj, (list, tuple)):
+            return [self._convert_numpy_types(item) for item in obj]
+        
+        # Handle pandas types
+        if pd.isna(obj):
+            return None
+        if isinstance(obj, pd.Series):
+            return obj.tolist()
+        if isinstance(obj, pd.DataFrame):
+            return obj.to_dict()
+        
+        return obj
     
     def generate_llm_insights(self, cluster_analysis: Dict, patterns: Dict) -> str:
         """
@@ -913,12 +1469,16 @@ class CompanyIntelligence:
         print("GENERATING LLM INSIGHTS")
         print("="*50)
         
+        # Convert numpy types to native Python types for JSON serialization
+        patterns_clean = self._convert_numpy_types(patterns)
+        cluster_analysis_clean = self._convert_numpy_types(cluster_analysis)
+        
         # Prepare summary for LLM
         summary = {
             'total_companies': len(self.df),
             'num_clusters': len(set(self.clusters)),
-            'cluster_sizes': {str(k): v['size'] for k, v in cluster_analysis.items()},
-            'key_patterns': patterns
+            'cluster_sizes': {str(k): v['size'] for k, v in cluster_analysis_clean.items()},
+            'key_patterns': patterns_clean
         }
         
         prompt = f"""You are a business intelligence analyst. Analyze the following company segmentation results and provide actionable insights.
@@ -929,7 +1489,7 @@ Dataset Summary:
 - Segment sizes: {summary['cluster_sizes']}
 
 Key Patterns Identified:
-{json.dumps(patterns, indent=2, default=str)}
+{json.dumps(patterns_clean, indent=2, default=str)}
 
 Please provide:
 1. A high-level summary of the segmentation
@@ -953,7 +1513,7 @@ Format your response in clear, business-friendly language suitable for executive
                     {"role": "system", "content": "You are an expert business intelligence analyst specializing in company data analysis and market segmentation."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.7,
+                temperature=0.3,  # FIXED: Lower temperature for more deterministic analytical insights (was 0.7)
                 max_tokens=1500
             )
             insights = response.choices[0].message.content
@@ -1074,7 +1634,8 @@ Format your response in clear, business-friendly language suitable for executive
             tfidf_matrix = self.tfidf_vectorizer.fit_transform(combined_text)
             self.tfidf_features = pd.DataFrame(
                 tfidf_matrix.toarray(),
-                columns=[f'TFIDF_{i}' for i in range(tfidf_matrix.shape[1])],
+                # FIXED: Use actual feature names instead of generic TFIDF_0, TFIDF_1, etc.
+                columns=self.tfidf_vectorizer.get_feature_names_out(),
                 index=self.df.index
             )
             
@@ -1089,17 +1650,22 @@ Format your response in clear, business-friendly language suitable for executive
             print(f"Error in TF-IDF processing: {e}")
             return None
     
-    def perform_chi_square_test(self, categorical_cols: List[str] = None):
+    def perform_chi_square_test(self, categorical_cols: List[str] = None, 
+                                 alpha: float = 0.05, correction_method: str = 'fdr_bh'):
         """
-        Perform Chi-square test of independence between categorical variables (Entity Type, Ownership Type) and clusters
-        FINDING TRENDS: Chi-Square Test
+        Perform Chi-square test of independence between categorical variables and clusters.
+        
+        FIXED: Added check for expected frequency >= 5 (chi-square assumption).
+        FIXED: Added multiple testing correction (Bonferroni/FDR) to control family-wise error rate.
         
         Args:
-            categorical_cols: List of categorical column names to test (defaults to Entity Type and Ownership Type)
+            categorical_cols: List of categorical column names to test
+            alpha: Significance level (default 0.05)
+            correction_method: Multiple testing correction method ('bonferroni', 'fdr_bh', 'fdr_by', or None)
         """
         print("\n" + "="*50)
         print("FINDING TRENDS: CHI-SQUARE TEST ANALYSIS")
-        print("Method: Chi-Square Test of Independence")
+        print("Method: Chi-Square Test of Independence (with assumption validation)")
         print("="*50)
         
         if self.clusters is None:
@@ -1119,6 +1685,8 @@ Format your response in clear, business-friendly language suitable for executive
             return None
         
         chi_square_results = {}
+        p_values = []
+        test_names = []
         
         for col in categorical_cols:
             try:
@@ -1127,30 +1695,99 @@ Format your response in clear, business-friendly language suitable for executive
                 
                 # Check if table is valid (at least 2x2)
                 if contingency.shape[0] < 2 or contingency.shape[1] < 2:
-                    print(f"  Skipping {col}: insufficient categories for chi-square test")
+                    print(f"  ⚠ Skipping {col}: insufficient categories for chi-square test")
                     continue
                 
-                # Perform chi-square test
+                # FIXED: Check expected frequency assumption (>= 5)
                 chi2, p_value, dof, expected = chi2_contingency(contingency)
+                
+                # Check if expected frequencies meet assumption
+                min_expected = np.min(expected)
+                cells_below_5 = np.sum(expected < 5)
+                total_cells = expected.size
+                violation_percentage = (cells_below_5 / total_cells) * 100
+                
+                assumption_violated = min_expected < 5
+                if assumption_violated:
+                    print(f"  ⚠ Warning for {col}: {cells_below_5}/{total_cells} cells ({violation_percentage:.1f}%) have expected frequency < 5")
+                    print(f"     Minimum expected frequency: {min_expected:.2f}")
+                    print(f"     Chi-square results may be unreliable. Consider:")
+                    print(f"     - Combining categories with low counts")
+                    print(f"     - Using Fisher's exact test for 2x2 tables")
+                    print(f"     - Using G-test (likelihood ratio test)")
                 
                 chi_square_results[col] = {
                     'chi2_statistic': chi2,
                     'p_value': p_value,
                     'degrees_of_freedom': dof,
-                    'is_significant': p_value < 0.05,
+                    'expected_frequencies': expected,
+                    'min_expected_frequency': min_expected,
+                    'cells_below_5': cells_below_5,
+                    'assumption_violated': assumption_violated,
                     'contingency_table': contingency
                 }
                 
-                significance = "SIGNIFICANT" if p_value < 0.05 else "NOT SIGNIFICANT"
-                print(f"\n{col}:")
-                print(f"  Chi-square statistic: {chi2:.4f}")
-                print(f"  P-value: {p_value:.6f}")
-                print(f"  Degrees of freedom: {dof}")
-                print(f"  Result: {significance} (α=0.05)")
+                p_values.append(p_value)
+                test_names.append(col)
                 
             except Exception as e:
-                print(f"Error testing {col}: {e}")
+                print(f"  ✗ Error testing {col}: {e}")
                 continue
+        
+        # FIXED: Apply multiple testing correction
+        if len(p_values) > 1 and correction_method:
+            try:
+                if HAS_STATSMODELS:
+                    if correction_method == 'bonferroni':
+                        _, p_adjusted, _, _ = multipletests(p_values, alpha=alpha, method='bonferroni')
+                    elif correction_method == 'fdr_bh':
+                        _, p_adjusted, _, _ = multipletests(p_values, alpha=alpha, method='fdr_bh')
+                    elif correction_method == 'fdr_by':
+                        _, p_adjusted, _, _ = multipletests(p_values, alpha=alpha, method='fdr_by')
+                    else:
+                        p_adjusted = p_values
+                else:
+                    # Fallback: Simple Bonferroni correction (multiply by number of tests)
+                    if correction_method == 'bonferroni':
+                        p_adjusted = [min(p * len(p_values), 1.0) for p in p_values]
+                    else:
+                        print(f"Warning: {correction_method} requires statsmodels. Using Bonferroni fallback.")
+                        p_adjusted = [min(p * len(p_values), 1.0) for p in p_values]
+                
+                # Update results with adjusted p-values
+                for i, col in enumerate(test_names):
+                    chi_square_results[col]['p_value_adjusted'] = p_adjusted[i]
+                    chi_square_results[col]['is_significant'] = p_adjusted[i] < alpha
+                    chi_square_results[col]['is_significant_unadjusted'] = p_values[i] < alpha
+                    chi_square_results[col]['correction_method'] = correction_method
+                
+                print(f"\nMultiple Testing Correction ({correction_method.upper()}):")
+                print(f"  Tests performed: {len(p_values)}")
+                significant_before = sum(1 for p in p_values if p < alpha)
+                significant_after = sum(1 for p in p_adjusted if p < alpha)
+                print(f"  Significant before correction: {significant_before}/{len(p_values)}")
+                print(f"  Significant after correction: {significant_after}/{len(p_values)}")
+                
+            except Exception as e:
+                print(f"  ⚠ Warning: Could not apply multiple testing correction: {e}")
+                # Fallback to unadjusted
+                for i, col in enumerate(test_names):
+                    chi_square_results[col]['is_significant'] = p_values[i] < alpha
+        else:
+            # Single test or no correction
+            for i, col in enumerate(test_names):
+                chi_square_results[col]['is_significant'] = p_values[i] < alpha
+                if len(p_values) == 1:
+                    chi_square_results[col]['correction_method'] = 'none (single test)'
+        
+        # Print summary
+        print(f"\nChi-Square Test Results:")
+        for col, result in chi_square_results.items():
+            sig_marker = "✓" if result['is_significant'] else "✗"
+            p_val = result.get('p_value_adjusted', result['p_value'])
+            print(f"  {sig_marker} {col}: χ²={result['chi2_statistic']:.3f}, p={p_val:.4f}")
+            if result.get('assumption_violated'):
+                print(f"    ⚠ Assumption violation: {result['cells_below_5']} cells with expected frequency < 5")
         
         # Summary
         if chi_square_results:
@@ -1158,7 +1795,7 @@ Format your response in clear, business-friendly language suitable for executive
                               if result['is_significant']]
             print(f"\n{'='*50}")
             print(f"Summary: {len(significant_vars)}/{len(chi_square_results)} categorical variables "
-                  f"show significant association with clusters")
+                  f"show significant association with clusters (after {correction_method} correction)")
             
             # Store trend finding metrics
             self.trend_metrics = {
@@ -1166,7 +1803,8 @@ Format your response in clear, business-friendly language suitable for executive
                 'significant_variables': significant_vars,
                 'total_tested': len(chi_square_results),
                 'significant_count': len(significant_vars),
-                'method': 'Chi-Square Test'
+                'correction_method': correction_method,
+                'method': 'Chi-Square Test (with assumption validation & multiple testing correction)'
             }
         
         return chi_square_results
@@ -1231,9 +1869,13 @@ Format your response in clear, business-friendly language suitable for executive
             if not HAS_TSNE:
                 print("Error: t-SNE not available. Install scikit-learn or use another method.")
                 return None
-            reducer = TSNE(n_components=n_components, random_state=42, perplexity=30)
+            # FIXED: Scale perplexity with dataset size (rule of thumb: sqrt(n_samples))
+            n_samples = self.df_processed_scaled.shape[0]  # Use input data shape, not undefined variable
+            optimal_perplexity = min(30, max(5, int(np.sqrt(n_samples))))
+            reducer = TSNE(n_components=n_components, random_state=42, perplexity=optimal_perplexity)
+            print(f"  Using t-SNE with perplexity={optimal_perplexity} (scaled for {n_samples} samples)")
             reduced_data = reducer.fit_transform(self.df_processed_scaled)
-            print(f"t-SNE: Completed (perplexity=30)")
+            print(f"t-SNE: Completed (perplexity={optimal_perplexity})")
             
         elif method.lower() == 'umap':
             if not HAS_UMAP:
@@ -1253,47 +1895,47 @@ Format your response in clear, business-friendly language suitable for executive
         
         return reduction_results
     
-    def train_logistic_regression(self, test_size: float = 0.2, random_state: int = 42):
+    def train_logistic_regression(self, test_size: float = 0.2, random_state: int = 42, 
+                                  use_original_features: bool = True, cv_folds: int = 5):
         """
-        Train logistic regression model to predict cluster membership using:
-        - Numeric features: Revenue, Employee Total, Employee Single Sites, Market Value, IT Spending & Budget
-        - TF-IDF features: From SIC, NAICS, NACE descriptions
-        - Dimensional reduction applied to combined features
+        Train logistic regression model to predict cluster membership.
+        
+        FIXED: Use original features instead of PCA for interpretability.
+        FIXED: Split data BEFORE scaling to prevent data leakage.
+        FIXED: Added cross-validation for stable metrics.
         
         Args:
             test_size: Proportion of data to use for testing
             random_state: Random seed for reproducibility
+            use_original_features: If True, use original features (interpretable). If False, use PCA.
+            cv_folds: Number of folds for cross-validation
         """
         print("\n" + "="*50)
         print("LOGISTIC REGRESSION - CLUSTER PREDICTION")
         print("="*50)
-        print("Using: Numeric features + TF-IDF features + Dimensional reduction")
         
         if self.clusters is None:
             print("Error: Must perform clustering first!")
             return None
         
-        if self.df_processed_scaled is None:
+        if self.df_processed is None:
             print("Error: Must preprocess data first!")
             return None
         
-        # Apply dimensional reduction to combined features
-        print("\nApplying dimensional reduction to features...")
-        reduction_result = self.apply_dimensionality_reduction(method='pca', n_components=min(50, self.df_processed_scaled.shape[1]))
-        
-        if reduction_result and 'reduced_data' in reduction_result:
-            X = reduction_result['reduced_data']
-            print(f"Reduced features from {self.df_processed_scaled.shape[1]} to {X.shape[1]} dimensions")
-            print(f"Explained variance: {sum(reduction_result['explained_variance']):.2%}")
+        # FIXED: Use original unscaled features for interpretability
+        if use_original_features:
+            X = self.df_processed.values
+            feature_names = self.df_processed.columns.tolist()
+            print(f"Using original features: {len(feature_names)} features")
         else:
-            # Fallback to original features if reduction fails
+            # Use scaled features (less interpretable)
             X = self.df_processed_scaled.values
-            print("Using original features (dimensional reduction not applied)")
+            feature_names = self.df_processed_scaled.columns.tolist()
+            print(f"Using scaled features: {len(feature_names)} features")
         
         y = self.clusters
         
-        # Split data with train/test split
-        # Check if stratification is possible (each class needs at least 2 samples)
+        # FIXED: Split data FIRST, then scale (prevents data leakage)
         unique, counts = np.unique(y, return_counts=True)
         can_stratify = all(counts >= 2) and len(unique) > 1
         
@@ -1307,13 +1949,31 @@ Format your response in clear, business-friendly language suitable for executive
                 X, y, test_size=test_size, random_state=random_state
             )
         
+        # FIXED: Scale AFTER split (fit on training, transform both)
+        scaler_lr = StandardScaler()
+        X_train_scaled = scaler_lr.fit_transform(X_train)
+        X_test_scaled = scaler_lr.transform(X_test)
+        
         print(f"\nTraining set: {X_train.shape[0]} samples, {X_train.shape[1]} features")
         print(f"Test set: {X_test.shape[0]} samples, {X_test.shape[1]} features")
         
-        # Train logistic regression
-        # Use solver='lbfgs' which supports multinomial by default for multi-class
+        # FIXED: Add cross-validation for stable metrics
+        print(f"\nPerforming {cv_folds}-fold cross-validation...")
         try:
-            # Try with multi_class parameter (for newer scikit-learn versions)
+            cv_scores = cross_val_score(
+                LogisticRegression(multi_class='multinomial', solver='lbfgs', max_iter=1000, random_state=random_state),
+                X_train_scaled, y_train,
+                cv=KFold(n_splits=cv_folds, shuffle=True, random_state=random_state),
+                scoring='accuracy'
+            )
+            print(f"CV Accuracy: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+            print(f"CV Scores per fold: {[f'{s:.4f}' for s in cv_scores]}")
+        except Exception as e:
+            print(f"Warning: Cross-validation failed: {e}")
+            cv_scores = None
+        
+        # Train logistic regression
+        try:
             self.logistic_model = LogisticRegression(
                 multi_class='multinomial',
                 solver='lbfgs',
@@ -1321,19 +1981,17 @@ Format your response in clear, business-friendly language suitable for executive
                 random_state=random_state
             )
         except TypeError:
-            # Fallback for older scikit-learn versions that don't support multi_class parameter
-            # 'lbfgs' solver automatically handles multinomial for multi-class problems
             self.logistic_model = LogisticRegression(
                 solver='lbfgs',
                 max_iter=1000,
                 random_state=random_state
             )
         
-        self.logistic_model.fit(X_train, y_train)
+        self.logistic_model.fit(X_train_scaled, y_train)
         
         # Predictions
-        y_train_pred = self.logistic_model.predict(X_train)
-        y_test_pred = self.logistic_model.predict(X_test)
+        y_train_pred = self.logistic_model.predict(X_train_scaled)
+        y_test_pred = self.logistic_model.predict(X_test_scaled)
         
         # Evaluate
         train_accuracy = accuracy_score(y_train, y_train_pred)
@@ -1341,60 +1999,78 @@ Format your response in clear, business-friendly language suitable for executive
         
         print(f"\nTraining Accuracy: {train_accuracy:.4f} ({train_accuracy*100:.2f}%)")
         print(f"Test Accuracy: {test_accuracy:.4f} ({test_accuracy*100:.2f}%)")
+        if cv_scores is not None:
+            print(f"CV Mean Accuracy: {cv_scores.mean():.4f} ({cv_scores.mean()*100:.2f}%)")
         
         # Classification report
         print("\nClassification Report (Test Set):")
         print(classification_report(y_test, y_test_pred))
         
-        # Feature importance (coefficients) - for reduced dimensions
+        # FIXED: Feature importance with original feature names (interpretable)
         driver_coefficients = {}
-        if hasattr(self.logistic_model, 'n_features_in_') and self.logistic_model.n_features_in_ < 50:
-            print("\nDRIVER IDENTIFICATION: Top contributing features per cluster:")
-            for i, cluster_id in enumerate(sorted(set(y))):
-                print(f"\nCluster {cluster_id}:")
-                coefs = self.logistic_model.coef_[i]
-                top_indices = np.argsort(np.abs(coefs))[-5:][::-1]
-                driver_coefficients[cluster_id] = {}
-                for idx in top_indices:
-                    driver_coefficients[cluster_id][f'Component_{idx}'] = float(coefs[idx])
-                    print(f"  Component {idx}: {coefs[idx]:.4f}")
+        print("\nDRIVER IDENTIFICATION: Top contributing features per cluster:")
+        for i, cluster_id in enumerate(sorted(set(y))):
+            print(f"\nCluster {cluster_id}:")
+            coefs = self.logistic_model.coef_[i]
+            top_indices = np.argsort(np.abs(coefs))[-10:][::-1]  # Top 10 features
+            driver_coefficients[cluster_id] = {}
+            
+            for idx in top_indices:
+                feature_name = feature_names[idx] if idx < len(feature_names) else f'Feature_{idx}'
+                coef_value = float(coefs[idx])
+                driver_coefficients[cluster_id][feature_name] = coef_value
+                print(f"  {feature_name}: {coef_value:.4f}")
         
         # Store driver identification metrics
         self.driver_metrics = {
             'coefficients': driver_coefficients,
             'train_accuracy': train_accuracy,
             'test_accuracy': test_accuracy,
-            'method': 'Logistic Regression (Coefficients)'
+            'cv_scores': cv_scores.tolist() if cv_scores is not None else None,
+            'cv_mean': float(cv_scores.mean()) if cv_scores is not None else None,
+            'cv_std': float(cv_scores.std()) if cv_scores is not None else None,
+            'feature_names': feature_names,
+            'method': 'Logistic Regression (Original Features - Interpretable)'
         }
         
         results = {
             'model': self.logistic_model,
+            'scaler': scaler_lr,
             'train_accuracy': train_accuracy,
             'test_accuracy': test_accuracy,
+            'cv_scores': cv_scores,
             'classification_report': classification_report(y_test, y_test_pred, output_dict=True),
             'confusion_matrix': confusion_matrix(y_test, y_test_pred),
-            'dimensional_reduction': reduction_result,
-            'coefficients': driver_coefficients
+            'coefficients': driver_coefficients,
+            'feature_names': feature_names
         }
         
         return results
     
-    def train_linear_regression(self, target_feature: str = None, test_size: float = 0.2, random_state: int = 42):
+    def train_linear_regression(self, target_feature: str = None, test_size: float = 0.2, 
+                                 random_state: int = 42, regularization: str = 'ridge', 
+                                 alpha: float = 1.0, check_multicollinearity: bool = True):
         """
-        Train linear regression model to predict a TARGET FEATURE (Revenue or Market Value)
+        Train linear regression model to predict a TARGET FEATURE (Revenue or Market Value).
+        
+        FIXED: Split data BEFORE scaling to prevent data leakage.
+        FIXED: Added regularization (Ridge/Lasso) to handle multicollinearity.
+        FIXED: Added VIF check for multicollinearity detection.
         
         Args:
             target_feature: Name of the target feature to predict ('revenue' or 'market_value')
-                          If None, uses 'revenue' as default
             test_size: Proportion of data to use for testing
             random_state: Random seed for reproducibility
+            regularization: 'ridge', 'lasso', 'elasticnet', or 'none' (default: 'ridge')
+            alpha: Regularization strength (default: 1.0)
+            check_multicollinearity: If True, check VIF and warn about multicollinearity
         """
         print("\n" + "="*50)
         print("PERFORMANCE FORECAST: LINEAR REGRESSION")
-        print("Method: Linear Regression (R² Score)")
+        print(f"Method: {regularization.upper()} Regression (R² Score)" if regularization != 'none' else "Method: Linear Regression (R² Score)")
         print("="*50)
         
-        if self.df_processed_scaled is None:
+        if self.df_processed is None:
             print("Error: Must preprocess data first!")
             return None
         
@@ -1405,7 +2081,6 @@ Format your response in clear, business-friendly language suitable for executive
         
         # Select target feature from target columns
         if target_feature is None:
-            # Default to revenue
             if 'revenue' in self.found_numeric:
                 target_feature = self.found_numeric['revenue']
                 print(f"Using default target: Revenue")
@@ -1416,7 +2091,6 @@ Format your response in clear, business-friendly language suitable for executive
                 print("Error: No suitable target feature found (revenue or market_value)!")
                 return None
         else:
-            # Find the actual column name
             target_key = None
             if 'revenue' in target_feature.lower():
                 target_key = 'revenue'
@@ -1432,8 +2106,58 @@ Format your response in clear, business-friendly language suitable for executive
                 else:
                     return None
         
-        # Prepare features and target
-        X = self.df_processed_scaled.values
+        # FIXED: Use UNSCALED features, split FIRST, then scale
+        # FIXED: Exclude features highly correlated with target to prevent data leakage
+        feature_names = self.df_processed.columns.tolist()
+
+        # Identify and exclude features that are derived from or highly correlated with target
+        # This prevents R² = 1.0 due to data leakage
+        features_to_exclude = []
+        target_col_name = target_feature.lower().replace(' ', '_').replace('(', '').replace(')', '')
+
+        # Define features that should be excluded when predicting specific targets
+        leakage_map = {
+            'revenue': ['it_budget', 'it_spend', 'it budget', 'it spend', 'it_investment_intensity',
+                       'market_value_to_revenue_ratio'],
+            'market_value': ['market_value_to_revenue_ratio', 'ps_ratio'],
+        }
+
+        # Find which target we're predicting
+        target_key = None
+        for key in leakage_map.keys():
+            if key in target_col_name or key in target_feature.lower():
+                target_key = key
+                break
+
+        if target_key:
+            for feat in feature_names:
+                feat_lower = feat.lower()
+                for exclude_pattern in leakage_map[target_key]:
+                    if exclude_pattern in feat_lower:
+                        features_to_exclude.append(feat)
+                        break
+
+        # Also exclude features with correlation > 0.95 with target
+        if target_feature in self.df.columns:
+            for feat in feature_names:
+                if feat in self.df.columns and feat not in features_to_exclude:
+                    try:
+                        corr = abs(self.df[feat].corr(self.df[target_feature]))
+                        if corr > 0.95:
+                            features_to_exclude.append(feat)
+                            print(f"  ⚠ Excluding '{feat}' (correlation {corr:.3f} with target)")
+                    except:
+                        pass
+
+        # Remove excluded features
+        if features_to_exclude:
+            print(f"\n⚠ Excluding {len(features_to_exclude)} features to prevent data leakage:")
+            for feat in features_to_exclude:
+                print(f"    - {feat}")
+            feature_names = [f for f in feature_names if f not in features_to_exclude]
+
+        # Get feature matrix with excluded columns removed
+        X = self.df_processed[feature_names].values
         y = self.df[target_feature].values
         
         # Remove rows with missing target values
@@ -1445,22 +2169,64 @@ Format your response in clear, business-friendly language suitable for executive
             print(f"Error: Not enough valid samples ({len(X)}) for linear regression!")
             return None
         
-        # Split data
+        # FIXED: Split data FIRST (before scaling)
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=random_state
         )
         
-        print(f"Training set: {X_train.shape[0]} samples")
-        print(f"Test set: {X_test.shape[0]} samples")
+        # FIXED: Scale AFTER split (fit on training, transform both)
+        scaler_lr = StandardScaler()
+        X_train_scaled = scaler_lr.fit_transform(X_train)
+        X_test_scaled = scaler_lr.transform(X_test)
+        
+        # FIXED: Check multicollinearity (VIF) before regression
+        if check_multicollinearity and HAS_STATSMODELS:
+            print("\nChecking for multicollinearity (VIF)...")
+            try:
+                # Calculate VIF for training data
+                vif_data = pd.DataFrame(X_train_scaled, columns=feature_names)
+                vif_scores = {}
+                for i, col in enumerate(feature_names):
+                    try:
+                        vif = variance_inflation_factor(X_train_scaled, i)
+                        vif_scores[col] = vif
+                    except:
+                        vif_scores[col] = np.nan
+                
+                high_vif = {k: v for k, v in vif_scores.items() if v > 10}
+                if high_vif:
+                    print(f"  ⚠ Warning: {len(high_vif)} features have VIF > 10 (multicollinearity):")
+                    for feat, vif_val in sorted(high_vif.items(), key=lambda x: x[1], reverse=True)[:5]:
+                        print(f"    {feat}: VIF = {vif_val:.2f}")
+                    print("  Recommendation: Use Ridge/Lasso regression or remove highly correlated features")
+                else:
+                    print(f"  ✓ No severe multicollinearity detected (all VIF < 10)")
+            except Exception as e:
+                print(f"  ⚠ Could not calculate VIF: {e}")
+        
+        print(f"\nTraining set: {X_train.shape[0]} samples, {X_train.shape[1]} features")
+        print(f"Test set: {X_test.shape[0]} samples, {X_test.shape[1]} features")
         print(f"Target feature: {target_feature}")
         
-        # Train linear regression
-        self.linear_model = LinearRegression()
-        self.linear_model.fit(X_train, y_train)
+        # FIXED: Use regularized regression to handle multicollinearity
+        if regularization.lower() == 'ridge':
+            self.linear_model = Ridge(alpha=alpha, random_state=random_state)
+            print(f"Using Ridge regression (L2 regularization, alpha={alpha})")
+        elif regularization.lower() == 'lasso':
+            self.linear_model = Lasso(alpha=alpha, random_state=random_state, max_iter=2000)
+            print(f"Using Lasso regression (L1 regularization, alpha={alpha})")
+        elif regularization.lower() == 'elasticnet':
+            self.linear_model = ElasticNet(alpha=alpha, l1_ratio=0.5, random_state=random_state, max_iter=2000)
+            print(f"Using ElasticNet regression (L1+L2, alpha={alpha})")
+        else:
+            self.linear_model = LinearRegression()
+            print("Using standard Linear Regression (no regularization)")
         
-        # Predictions
-        y_train_pred = self.linear_model.predict(X_train)
-        y_test_pred = self.linear_model.predict(X_test)
+        self.linear_model.fit(X_train_scaled, y_train)
+        
+        # Predictions (use scaled data)
+        y_train_pred = self.linear_model.predict(X_train_scaled)
+        y_test_pred = self.linear_model.predict(X_test_scaled)
         
         # Evaluate
         train_mse = mean_squared_error(y_train, y_train_pred)
@@ -1683,15 +2449,41 @@ Format your response in clear, business-friendly language suitable for executive
                 axes = axes.flatten() if n_rows > 1 else [axes] if n_cols == 1 else axes
             
             for idx, feature in enumerate(top_features):
-                self.df.boxplot(column=feature, by='Cluster', ax=axes[idx])
-                axes[idx].set_title(f'{feature} by Cluster')
+                # FIXED: Apply log10 transformation to handle skewed financial data
+                feature_data = self.df[feature].copy()
+
+                # Check if data spans multiple orders of magnitude (skewed)
+                valid_data = feature_data[feature_data > 0]
+                if len(valid_data) > 0:
+                    data_range = valid_data.max() / (valid_data.min() + 1e-10)
+                    use_log = data_range > 100  # Use log scale if range > 100x
+                else:
+                    use_log = False
+
+                if use_log:
+                    # Create log-transformed column for visualization
+                    log_col_name = f'_log_{feature}'
+                    self.df[log_col_name] = np.where(
+                        self.df[feature] > 0,
+                        np.log10(self.df[feature] + 1),
+                        np.nan
+                    )
+                    self.df.boxplot(column=log_col_name, by='Cluster', ax=axes[idx])
+                    axes[idx].set_title(f'{feature}\n(Log10 Scale)')
+                    axes[idx].set_ylabel('Log10(value + 1)')
+                    # Clean up temporary column
+                    self.df.drop(columns=[log_col_name], inplace=True)
+                else:
+                    self.df.boxplot(column=feature, by='Cluster', ax=axes[idx])
+                    axes[idx].set_title(f'{feature}')
+
                 axes[idx].set_xlabel('Cluster')
-            
+
             # Hide extra subplots
             for idx in range(n_features, len(axes)):
                 axes[idx].set_visible(False)
-            
-            plt.suptitle('Target Feature Comparison Across Clusters', y=1.02)
+
+            plt.suptitle('Target Feature Comparison Across Clusters (Log Scale for Skewed Data)', y=1.02)
             plt.tight_layout()
             plt.savefig('feature_comparison.png', dpi=300, bbox_inches='tight')
             plt.close()
@@ -1767,14 +2559,18 @@ Format your response in clear, business-friendly language suitable for executive
             report.append("Silhouette Score Interpretation:")
             report.append("  - Score ranges from -1 to 1")
             report.append("  - Values closer to 1 indicate well-separated clusters")
-            if metrics['optimal_silhouette_score'] > 0.5:
-                report.append(f"  - Score of {metrics['optimal_silhouette_score']:.4f} indicates: EXCELLENT cluster separation and cohesion")
-            elif metrics['optimal_silhouette_score'] > 0.3:
-                report.append(f"  - Score of {metrics['optimal_silhouette_score']:.4f} indicates: GOOD cluster structure with reasonable separation")
-            elif metrics['optimal_silhouette_score'] > 0.1:
-                report.append(f"  - Score of {metrics['optimal_silhouette_score']:.4f} indicates: FAIR clustering with some overlap between segments")
+            # FIXED: Use standard silhouette score interpretation thresholds
+            score = metrics['optimal_silhouette_score']
+            if score > 0.7:
+                report.append(f"  - Score of {score:.4f} indicates: STRONG cluster structure (well-separated)")
+            elif score > 0.5:
+                report.append(f"  - Score of {score:.4f} indicates: REASONABLE cluster structure")
+            elif score > 0.25:
+                report.append(f"  - Score of {score:.4f} indicates: FAIR/WEAK structure (clusters may overlap)")
+                report.append("    Note: Scores in this range suggest clusters exist but have significant overlap")
             else:
-                report.append(f"  - Score of {metrics['optimal_silhouette_score']:.4f} indicates: WEAK clustering - segments may not be well-defined")
+                report.append(f"  - Score of {score:.4f} indicates: NO SUBSTANTIAL structure found")
+                report.append("    Note: Consider using fewer clusters or different features")
             report.append("")
             report.append("DATA IMPLICATIONS:")
             report.append("  • The segmentation identifies distinct company groups based on:")

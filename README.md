@@ -5,7 +5,7 @@ A comprehensive Python-based machine learning system for analyzing company data 
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [System Architecture](#system-architecture)
@@ -18,7 +18,7 @@ A comprehensive Python-based machine learning system for analyzing company data 
 
 ---
 
-## 📊 Overview
+## Overview
 
 This system transforms raw company attributes (financial metrics, employee data, technology infrastructure, industry classifications) into interpretable company intelligence. It provides:
 
@@ -33,7 +33,7 @@ Organizations need to understand company landscapes to make informed decisions a
 
 ---
 
-## 🎯 Key Features
+## Key Features
 
 ### 1. **Intelligent Data Processing**
 - **Automatic Column Detection**: Pattern-based matching handles various naming conventions
@@ -142,7 +142,7 @@ Automatically calculates 10+ derived metrics:
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 ### Project Structure
 ```
@@ -197,7 +197,7 @@ Fournity/
 
 ---
 
-## 📦 Installation
+## Installation
 
 ### Prerequisites
 - Python 3.8 or higher
@@ -239,7 +239,7 @@ Fournity/
 
 ---
 
-## 🚀 Usage
+## Usage
 
 ### Quick Start - Three Ways to Run
 
@@ -353,7 +353,7 @@ analyzer.df.to_csv('companies_with_segments.csv', index=False)
 
 ---
 
-## 📈 Data Format
+## Data Format
 
 ### Expected Input Format
 Excel (.xlsx, .xls) or CSV format with the following columns:
@@ -383,7 +383,7 @@ Excel (.xlsx, .xls) or CSV format with the following columns:
 
 ---
 
-## 🔬 Technical Details
+## Technical Details
 
 ### Algorithms & Methods
 
@@ -433,7 +433,7 @@ Excel (.xlsx, .xls) or CSV format with the following columns:
 
 ---
 
-## 📊 Output Files
+## Output Files
 
 ### Generated Files
 
@@ -457,7 +457,7 @@ Excel (.xlsx, .xls) or CSV format with the following columns:
 
 ---
 
-## 🎯 Use Cases
+## Use Cases
 
 ### 1. Sales Intelligence
 - Segment prospects by characteristics
@@ -485,7 +485,7 @@ Excel (.xlsx, .xls) or CSV format with the following columns:
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
 ### Clustering Parameters
 ```python
@@ -556,7 +556,7 @@ pip install -r requirements.txt
 
 ---
 
-## 📚 Dependencies
+## Dependencies
 
 ### Core Libraries
 - pandas (≥2.0.0) - Data manipulation
@@ -590,7 +590,7 @@ pip install -r requirements.txt
 
 ---
 
-## 👥 Team Members
+## Team Members
 
 **Team Fournity - SDS DATATHON 2026**
 
@@ -598,13 +598,13 @@ This project was developed for the SDS DATATHON 2026 - Category A competition, f
 
 ---
 
-## 📝 License
+## License
 
 This project is provided for the SDS DATATHON 2026 competition.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 Special thanks to:
 - SDS (Singapore Data Science Society) for organizing the DATATHON 2026
